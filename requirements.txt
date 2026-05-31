@@ -1,0 +1,11 @@
+# astrowidget runtime dependencies.
+#
+# Only one external Python package. requests is the conventional choice
+# for HTTPS POST with JSON over urllib; the standard library alternative
+# is workable but noisy.
+#
+# Version floor of 2.32.4 is set to ensure CVE-2024-47081 (netrc credential
+# leak on redirects) is patched. dnf on Fedora 43 ships a recent build that
+# already satisfies this — the pin is just documentation for installs
+# managed via pip on other distributions.
+requests>=2.32.4

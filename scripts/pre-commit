@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# astrowidget pre-commit guard.
+#
+# Refuses commits that would leak personal data:
+#   - config.toml or state.json under any name (canonical files + obvious
+#     misnames like config.toml.bak, config-prod.toml, notes/config.toml.local)
+#   - high-entropy GUID-shape strings (Astrospheric Pro key format)
+#   - lat/lon-shaped float pairs in non-template files
+#
+# Activate with:
+#   ln -s ../../scripts/pre-commit .git/hooks/pre-commit
+#
+# Or for a non-symlink install (which survives clone better):
+#   cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+#
+# Bypass once (emergency) with --no-verify on the commit. Don't make a habit
+# of that — the alternative is editing the matched file out of the index.
+
+set -euo pipefail
+
+# List of staged additions/modifications. We never check deletions.
+staged_files() {
+	git diff --cached --name-only --diff-filter=AM
+}
+
+FAILED=0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Forbidden filenames.
+# ─────────────────────────────────────────────────────────────────────────────
+while IFS= read -r f; do
+	[[ -z "$f" ]] && continue
+	# config.example.toml is the only allowed config.toml-shaped file.
+	if [[ "$f" == "config.example.toml" ]]; then
+		continue
+	fi
+	# Anything matching config*.toml is a likely leak.
+	if [[ "$(basename "$f")" =~ ^config.*\.toml(\..*)?$ ]]; then
+		echo "pre-commit: REFUSED — $f matches config*.toml (move out of staged)" >&2
+		FAILED=1
+	fi
+	# state.json / state.prev.json / variants.
+	if [[ "$(basename "$f")" =~ ^state(\..*)?\.json$ ]]; then
+		echo "pre-commit: REFUSED — $f matches state*.json (move out of staged)" >&2
+		FAILED=1
+	fi
+done < <(staged_files)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. High-entropy GUID-shape strings (Astrospheric Pro keys observed in
+#    the GUID format 8-4-4-4-12 hex chars). Skip the example template.
+# ─────────────────────────────────────────────────────────────────────────────
+GUID_RE='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+while IFS= read -r f; do
+	[[ -z "$f" ]] && continue
+	# Only check text-like files. Binary files would trigger false positives.
+	if ! [[ "$f" =~ \.(toml|json|md|py|qml|dart|sh|yaml|yml|xml|service|timer|txt|cfg|ini)$ ]]; then
+		continue
+	fi
+	# Skip the example template — placeholder GUID-like values are acceptable there.
+	[[ "$f" == "config.example.toml" ]] && continue
+	if git show ":$f" 2>/dev/null | grep -qE "$GUID_RE"; then
+		# Print the offending line for diagnosis.
+		echo "pre-commit: REFUSED — $f contains a GUID-shape string (looks like an API key):" >&2
+		git show ":$f" | grep -nE "$GUID_RE" | head -3 >&2
+		FAILED=1
+	fi
+done < <(staged_files)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. Lat/lon-shaped float pairs in non-template files.
+#    Pattern: lat = <signed float>, lon = <signed float> with .toml syntax.
+#    Bypass list: config.example.toml (template), tests/ (fixtures need coords),
+#    docs/ (documentation), notes/ (gitignored anyway).
+# ─────────────────────────────────────────────────────────────────────────────
+LATLON_RE='lat\s*=\s*[+-]?[0-9]+\.[0-9]+'
+while IFS= read -r f; do
+	[[ -z "$f" ]] && continue
+	case "$f" in
+		config.example.toml|tests/*|docs/*|notes/*) continue ;;
+	esac
+	if git show ":$f" 2>/dev/null | grep -qE "$LATLON_RE"; then
+		# Allow placeholder coordinates (anything within ±0.01° of 0,0).
+		# This is the Null Island sentinel used in templates and would
+		# never be a real imaging location.
+		if ! git show ":$f" | grep -E "$LATLON_RE" \
+				| grep -qvE 'lat\s*=\s*-?0\.0*[0-9]?\s'; then
+			# Every matching line is Null Island; allow.
+			continue
+		fi
+		echo "pre-commit: REFUSED — $f contains lat/lon coordinates (likely personal):" >&2
+		git show ":$f" | grep -nE "$LATLON_RE" | head -3 >&2
+		FAILED=1
+	fi
+done < <(staged_files)
+
+if [[ $FAILED -ne 0 ]]; then
+	echo "" >&2
+	echo "pre-commit: one or more checks failed. Commit aborted." >&2
+	echo "  To bypass for an emergency (use sparingly):  git commit --no-verify" >&2
+	exit 1
+fi
+
+exit 0

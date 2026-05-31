@@ -1,0 +1,182 @@
+"""
+Tests for configuration loading and validation.
+
+The fetcher refuses to start if the config file is missing, world-readable,
+malformed, or has placeholder values. All failures emit a notify-send so
+users see misconfiguration immediately.
+"""
+
+import os
+import stat
+import textwrap
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+import astrowidget_fetch as fx
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _write_config(tmp_path: Path, content: str, mode: int = 0o600) -> Path:
+	"""Writes a config.toml to tmp and returns the path."""
+	path = tmp_path / "config.toml"
+	path.write_text(textwrap.dedent(content), encoding="utf-8")
+	os.chmod(path, mode)
+	return path
+
+
+VALID_CONFIG = """
+[api]
+astrospheric_key = "fake-key-for-tests"
+astrospheric_daily_credit_budget = 100
+
+[open_meteo]
+models = ["gfs_seamless"]
+
+[[sites]]
+id = "site_a"
+label = "Test Site"
+lat = 47.0
+lon = -122.0
+timezone = "UTC"
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_load_config_happy_path(tmp_path, monkeypatch):
+	"""Valid config loads without error, returns parsed dict."""
+	cfg_path = _write_config(tmp_path, VALID_CONFIG, mode=0o600)
+	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
+	with patch.object(fx, "_notify"):
+		cfg = fx.load_config()
+	assert cfg["api"]["astrospheric_key"] == "fake-key-for-tests"
+	assert cfg["sites"][0]["id"] == "site_a"
+
+
+def test_load_config_missing_file_exits_2(tmp_path, monkeypatch):
+	"""No config file → exit 2 with a notify-send."""
+	monkeypatch.setattr(fx, "CONFIG_PATH", tmp_path / "nonexistent.toml")
+	with patch.object(fx, "_notify") as nf:
+		with pytest.raises(SystemExit) as ei:
+			fx.load_config()
+	assert ei.value.code == 2
+	# The notify-send must have fired with critical urgency.
+	nf.assert_called_once()
+	assert "critical" in nf.call_args.kwargs.get("urgency", "")
+
+
+def test_load_config_world_readable_rejected(tmp_path, monkeypatch):
+	"""chmod 644 → exit 2 with a permission-specific notification.
+	(test-analyzer flagged that only exit code was asserted; a regression
+	flipping the perm check into a 'parse error' notification would have
+	passed silently. Now asserts the title mentions permissions.)"""
+	cfg_path = _write_config(tmp_path, VALID_CONFIG, mode=0o644)
+	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
+	with patch.object(fx, "_notify") as nf:
+		with pytest.raises(SystemExit) as ei:
+			fx.load_config()
+	assert ei.value.code == 2
+	nf.assert_called_once()
+	title = nf.call_args.args[0]
+	assert "permission" in title.lower() or "perms" in title.lower(), \
+		f"expected permission-specific notification title, got: {title!r}"
+
+
+def test_load_config_missing_api_key_rejected(tmp_path, monkeypatch):
+	"""Empty astrospheric_key → exit 2."""
+	cfg = VALID_CONFIG.replace('"fake-key-for-tests"', '""')
+	cfg_path = _write_config(tmp_path, cfg, mode=0o600)
+	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
+	with patch.object(fx, "_notify"):
+		with pytest.raises(SystemExit) as ei:
+			fx.load_config()
+	assert ei.value.code == 2
+
+
+def test_load_config_no_sites_rejected(tmp_path, monkeypatch):
+	"""Missing [[sites]] block → exit 2."""
+	cfg = """
+	[api]
+	astrospheric_key = "k"
+	"""
+	cfg_path = _write_config(tmp_path, cfg, mode=0o600)
+	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
+	with patch.object(fx, "_notify"):
+		with pytest.raises(SystemExit) as ei:
+			fx.load_config()
+	assert ei.value.code == 2
+
+
+def test_load_config_null_island_rejected(tmp_path, monkeypatch):
+	"""Placeholder coords (0.0, 0.0) → exit 2 to prevent wasted API credits."""
+	cfg = VALID_CONFIG.replace("lat = 47.0", "lat = 0.0").replace(
+		"lon = -122.0", "lon = 0.0"
+	)
+	cfg_path = _write_config(tmp_path, cfg, mode=0o600)
+	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
+	with patch.object(fx, "_notify"):
+		with pytest.raises(SystemExit) as ei:
+			fx.load_config()
+	assert ei.value.code == 2
+
+
+def test_load_config_malformed_toml_rejected(tmp_path, monkeypatch):
+	"""Syntax error in TOML → exit 2 with parse-error message."""
+	cfg_path = _write_config(tmp_path, "this is not = valid = toml", mode=0o600)
+	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
+	with patch.object(fx, "_notify"):
+		with pytest.raises(SystemExit) as ei:
+			fx.load_config()
+	assert ei.value.code == 2
+
+
+# ── Per-site source/visibility flags (7-site expansion) ──────────────────────
+
+
+def test_load_config_flag_defaults_to_primary_astrospheric(tmp_path, monkeypatch):
+	"""A site with neither flag defaults both to True — the pre-expansion NA-only
+	behavior — so older configs keep working unchanged."""
+	cfg_path = _write_config(tmp_path, VALID_CONFIG, mode=0o600)
+	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
+	with patch.object(fx, "_notify"):
+		cfg = fx.load_config()
+	site = cfg["sites"][0]
+	assert site["primary"] is True
+	assert site["use_astrospheric"] is True
+
+
+def test_load_config_rejects_non_bool_use_astrospheric(tmp_path, monkeypatch):
+	"""use_astrospheric = "false" (a STRING) must be rejected, not silently
+	accepted: a truthy string would enable Astrospheric on an out-of-domain
+	international site, burning credits and erroring every run. The most
+	expensive misconfiguration the expansion introduced."""
+	cfg = VALID_CONFIG + '\nuse_astrospheric = "false"\n'
+	cfg_path = _write_config(tmp_path, cfg, mode=0o600)
+	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
+	with patch.object(fx, "_notify") as nf:
+		with pytest.raises(SystemExit) as ei:
+			fx.load_config()
+	assert ei.value.code == 2
+	assert "use_astrospheric" in nf.call_args.args[0]
+
+
+def test_load_config_rejects_non_bool_primary(tmp_path, monkeypatch):
+	"""primary = 1 (an INTEGER) must be rejected — only the TOML boolean is
+	valid. (bool is an int subclass, so the guard must reject a real int.)"""
+	cfg = VALID_CONFIG + "\nprimary = 1\n"
+	cfg_path = _write_config(tmp_path, cfg, mode=0o600)
+	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
+	with patch.object(fx, "_notify") as nf:
+		with pytest.raises(SystemExit) as ei:
+			fx.load_config()
+	assert ei.value.code == 2
+	assert "primary" in nf.call_args.args[0]

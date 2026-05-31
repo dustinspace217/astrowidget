@@ -1,0 +1,41 @@
+# Configuration with API keys and personal data — NEVER commit
+config.toml
+*.key
+*.pem
+.env
+.env.*
+
+# Generated state (runtime cache)
+state.json
+state.prev.json
+
+# Compiled binaries (rebuild from astroplan)
+bin/astrowidget-score
+
+# Internal development documentation — not part of the distributed product
+docs/superpowers/
+notes/
+
+# Python build / test artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+.tox/
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

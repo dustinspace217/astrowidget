@@ -1,0 +1,128 @@
+# astrowidget configuration template
+#
+# Copy this file to ~/.config/astrowidget/config.toml and edit.
+# Then: chmod 600 ~/.config/astrowidget/config.toml
+# The fetcher refuses to read configs that are not 0600.
+
+[api]
+# Get your Astrospheric Pro API key from https://www.astrospheric.com/account
+# Pro tier is required for API access.
+astrospheric_key = ""
+
+# Pro accounts get 100 credits/day. GetForecastData_V1 costs 5 credits per call.
+# Set to 0 to disable budget tracking.
+astrospheric_daily_credit_budget = 100
+
+# Open-Meteo is free and requires no key.
+[open_meteo]
+# Open-Meteo cloud-cover models for the multi-model ensemble. For North-America
+# sites these three are averaged with Astrospheric's Cloud Sense (RDPS) into the
+# consensus cloud value that drives scoring, and their spread is shown as the
+# convergence indicator. For international sites (use_astrospheric = false) these
+# three ARE the cloud ensemble on their own. GFS is taken from Open-Meteo only
+# (Astrospheric's GFS/NAM are undocumented), so the mean never double-counts a
+# model. These are distinct physical models — NOT Open-Meteo's best_match blend,
+# which is itself a mix of them and would corrupt the convergence spread.
+models = ["gfs_seamless", "ecmwf_ifs04", "icon_seamless"]
+
+# Add [[sites]] blocks for the sites you want to monitor.
+# Lat/lon in decimal degrees, negative for south/west.
+# `id` must be lowercase a-z 0-9; it is used as the state.json key.
+#
+# Two optional per-site flags control data source and layout:
+#
+#   primary           true  -> full always-on column in the popup (default).
+#                     false -> collapsed verdict chip; click to expand. Use for
+#                              sites you only check occasionally.
+#   use_astrospheric  true  -> North-America site (default): fetches the
+#                              Astrospheric Pro feed (seeing/transparency) and
+#                              scores cloud on the Astrospheric + Open-Meteo
+#                              ensemble.
+#                     false -> International site: SKIPS Astrospheric (its API
+#                              errors outside North America) and uses the free
+#                              7Timer service for seeing/transparency plus
+#                              Open-Meteo for cloud/precip/wind. Spends no credits.
+#
+# Both default to true, so a minimal North-America site needs neither flag.
+# Only use_astrospheric sites consume Astrospheric credits (5 per site per run,
+# 4 runs/day); international sites are free and unlimited.
+
+[[sites]]
+id = "site_a"
+label = "My Site"
+lat = 0.0
+lon = 0.0
+timezone = "UTC"
+# primary = true            # full column (this is the default)
+# use_astrospheric = true   # North-America site, uses Astrospheric (default)
+
+# A second North-America site (also uses Astrospheric):
+# [[sites]]
+# id = "site_b"
+# label = "Remote Observatory"
+# lat = 0.0
+# lon = 0.0
+# timezone = "America/Denver"
+
+# An international PRIMARY site — no Astrospheric, uses 7Timer + Open-Meteo:
+# [[sites]]
+# id = "site_c"
+# label = "Southern Hemisphere Site"
+# lat = 0.0
+# lon = 0.0
+# timezone = "UTC"
+# use_astrospheric = false
+
+# An international SECONDARY site — collapsed chip, click to expand:
+# [[sites]]
+# id = "site_d"
+# label = "Rarely-Used Site"
+# lat = 0.0
+# lon = 0.0
+# timezone = "UTC"
+# primary = false
+# use_astrospheric = false
+
+# Optional per-site veto thresholds. Defaults come from the scoring engine's
+# calibration constants -- override only when your site/scope needs it.
+#
+# The threshold-section key must EXACTLY match the site's `id` above (incl.
+# capitalization), or the override silently won't apply.
+#
+# [thresholds.site_a]
+#
+# wind_max_kmh: vetoes the night if AVERAGE wind over the astro-dark imaging
+#   window exceeds this (tracking/equipment risk). iTelescope domes auto-close
+#   near 48 km/h (~30 mph), so ~48 is a natural ceiling for hosted sites.
+# wind_max_kmh = 40
+#
+# precip_max_pct: EQUIPMENT-PROTECTION veto. Fires if the PEAK (highest)
+#   precipitation probability during the SUNSET-TO-SUNRISE window (when the
+#   scope is uncovered) exceeds this. Daytime rain is ignored (scope covered).
+#   This is a PEAK check, not an average: a single risky hour vetoes the night.
+#   So 5 means "veto if any overnight hour shows >5% chance" — very strict
+#   (marine/humid sites veto most nights). ~15-20 captures a real chance of
+#   rain while ignoring trivial 5-10% forecast noise. Default 30.
+# precip_max_pct = 20
+#
+# dew_spread_min_c: vetoes if AVERAGE (temp - dewpoint) over the imaging window
+#   drops below this (condensation risk on optics/electronics). Default 1.5.
+# dew_spread_min_c = 1.5
+
+[notifications]
+# Fire notification when tonight's verdict transitions upward
+# (Neither -> NB-only, NB-only -> BB+NB, Neither -> BB+NB).
+upward_transitions = true
+
+# Fire notification when tonight's verdict degrades, but only on the day-of
+# (e.g., after sunset on the same day you were planning to image).
+downward_transitions_day_of = true
+
+# Fire a reminder notification when astronomical dark begins at a site with
+# a current GO verdict. This is the imaging-start reminder.
+astro_dark_start_reminder = true
+
+# If true, all notifications are suppressed during astronomical dark hours
+# at the user's primary site. Default false because the astro-dark-begins
+# reminder is meant to fire during dark hours.
+suppress_during_astro_dark = false

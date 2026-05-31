@@ -1,0 +1,19 @@
+{
+	"KPlugin": {
+		"Authors": [
+			{
+				"Name": "Dustin"
+			}
+		],
+		"Category": "System Information",
+		"Description": "At-a-glance astrophotography forecast for up to three imaging sites. Combines Astrospheric (Pro API) with Open-Meteo for cloud, transparency, seeing, moon, and per-site BB/NB/Neither verdicts.",
+		"Icon": "weather-clear-night",
+		"Id": "space.dustin.astrowidget",
+		"License": "GPL-3.0-or-later",
+		"Name": "astrowidget",
+		"Version": "0.1",
+		"Website": "https://github.com/dustinspace217/astrowidget"
+	},
+	"X-Plasma-API-Minimum-Version": "6.0",
+	"KPackageStructure": "Plasma/Applet"
+}

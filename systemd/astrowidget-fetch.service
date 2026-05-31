@@ -1,0 +1,18 @@
+[Unit]
+Description=astrowidget Astrospheric + Open-Meteo fetcher
+Documentation=https://github.com/dustinspace217/astrowidget
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# Runs once per timer fire, then exits. The widget reads the resulting
+# state.json on its own schedule.
+Type=oneshot
+ExecStart=%h/Claude/astrowidget/fetcher/astrowidget_fetch.py
+StandardOutput=journal
+StandardError=journal
+# Modest resource cap — fetcher peak is ~50 MB Python + ~50 MB Dart subprocess.
+# Cap at 200 MB to catch any runaway condition without disturbing normal runs.
+MemoryMax=200M
+# Hard stop if the fetcher hangs (e.g., API stuck open).
+TimeoutStartSec=120

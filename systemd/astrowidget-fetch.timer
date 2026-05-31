@@ -1,0 +1,22 @@
+[Unit]
+Description=astrowidget fetch schedule (4x daily, aligned to Astrospheric refresh)
+Documentation=https://github.com/dustinspace217/astrowidget
+
+[Timer]
+# Astrospheric refreshes every 6 hours starting at 00:00 UTC. Firing at +10
+# minutes guarantees we read the new model run rather than the prior one.
+OnCalendar=*-*-* 00,06,12,18:10:00 UTC
+
+# Persistent=true makes a missed fire (laptop suspended over a refresh slot)
+# trigger on next user-session start, so we don't have to wait up to 6 hours
+# for the next aligned slot.
+Persistent=true
+
+# Small randomized delay (60 s) so multiple users running the same widget
+# don't hammer Astrospheric at exactly the same instant.
+RandomizedDelaySec=60
+
+Unit=astrowidget-fetch.service
+
+[Install]
+WantedBy=timers.target

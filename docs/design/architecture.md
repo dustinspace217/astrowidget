@@ -18,7 +18,7 @@ rationale, and component interfaces), see the internal spec under
 │         (GET, free, no key)       precip prob, gusts,           │
 │                                    visibility, temp, dewpoint   │
 │                                ▼                                │
-│  Dart scoring binary (subprocess, compiled from astroplan):     │
+│  Dart scoring binary (subprocess, from vendored scoring/):      │
 │    - scoreLocation() × 2 per site (broadband, narrowband)       │
 │    - Moon geometry + astro dark window computed locally         │
 │                                ▼                                │
@@ -42,9 +42,11 @@ rationale, and component interfaces), see the internal spec under
 - **Secret isolation.** The Astrospheric key lives in `~/.config/astrowidget/`
   (perms 0600), readable only by the Python fetcher. The Dart binary and QML
   package never see it.
-- **Scoring reuse.** The Dart binary is built from the same `scoreLocation()`
-  function the `astroplan` mobile app uses, with identical calibration. The
-  binary is invoked as a subprocess; the fetcher is otherwise scoring-agnostic.
+- **Scoring reuse.** The Dart binary is built from the vendored `scoring/`
+  package — a frozen, self-contained copy of the `scoreLocation()` engine the
+  `astroplan` app also uses (see `scoring/VENDORED.md`). astrowidget has no
+  build- or run-time dependency on astroplan; the binary is invoked as a
+  subprocess, and the fetcher is otherwise scoring-agnostic.
 
 ## Recommendation algorithm
 

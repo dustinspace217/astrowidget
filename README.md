@@ -39,8 +39,6 @@ KDE Plasma 6 and may work on other Plasma 6 distributions without modification.
 - KDE Plasma 6 (Wayland or X11)
 - Python 3.12 or later
 - Dart SDK 3.11 or later (for building the scoring binary)
-- A working installation of [astroplan](https://github.com/dustinspace217/astroplan)
-  at `~/Claude/astroplan` (the scoring engine source)
 - An [Astrospheric Pro](https://www.astrospheric.com/account) account and API key
 - `requests` (`pip install requests`)
 - `notify-send` (provided by libnotify on most distributions)
@@ -48,9 +46,10 @@ KDE Plasma 6 and may work on other Plasma 6 distributions without modification.
 ## Installation
 
 ```bash
-# Build the Dart scoring binary from astroplan.
-cd ~/Claude/astroplan
-dart compile exe bin/score_location.dart -o ~/Claude/astrowidget/bin/astrowidget-score
+# Build the Dart scoring binary from the self-contained scoring/ package.
+# (dart build cli, NOT dart compile exe — geoengine ships native-asset build hooks.)
+cd scoring && dart pub get && dart build cli -t bin/score_location.dart -o build
+cp build/bundle/bin/score_location ../bin/astrowidget-score && cd ..
 
 # Install the plasmoid package.
 cd ~/Claude/astrowidget
@@ -143,15 +142,19 @@ QML plasmoid reads state.json (no network, no secrets)
 `astrowidget` is released under the **GNU General Public License v3.0 or later**.
 See `LICENSE` for the full text.
 
-The Dart scoring engine reused here lives in the `astroplan` repository (same
-author, GPL-compatible).
+The Dart scoring engine under `scoring/` is **vendored** (a frozen copy) from
+the author's separate `astroplan` project — astrowidget reuses its ideas and
+methods but is a fully independent application with no build- or run-time
+dependency on astroplan. See `scoring/VENDORED.md`.
 
 ## Acknowledgments
 
 - Forecast data from [Astrospheric](https://www.astrospheric.com/) (Pro
   subscription) and [Open-Meteo](https://open-meteo.com/) (data under
   [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)).
-- Scoring engine from [astroplan](https://github.com/dustinspace217/astroplan).
+- Scoring engine vendored from the author's
+  [astroplan](https://github.com/dustinspace217/astroplan) project (same author,
+  GPL-compatible).
 - KDE Plasma 6 — the platform this widget targets.
 
 ## Contributing

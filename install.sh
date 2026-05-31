@@ -13,8 +13,8 @@ set -euo pipefail
 # Resolve paths relative to this script's location so the installer works
 # from any cwd.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ASTROPLAN_DIR="${ASTROPLAN_DIR:-$HOME/Claude/astroplan}"
 WIDGET_DIR="$SCRIPT_DIR"
+SCORING_DIR="$WIDGET_DIR/scoring"   # self-contained vendored Dart scoring engine
 PLASMOID_DIR="$WIDGET_DIR/plasmoid/space.dustin.astrowidget"
 BIN_DIR="$WIDGET_DIR/bin"
 SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
@@ -44,9 +44,9 @@ if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" 
 	exit 1
 fi
 
-if [[ ! -d "$ASTROPLAN_DIR" ]]; then
-	echo "astrowidget install: astroplan not found at $ASTROPLAN_DIR" >&2
-	echo "  Set ASTROPLAN_DIR environment variable or clone astroplan first." >&2
+if [[ ! -f "$SCORING_DIR/bin/score_location.dart" ]]; then
+	echo "astrowidget install: vendored scoring engine missing at $SCORING_DIR" >&2
+	echo "  Expected scoring/bin/score_location.dart in the repo (it is self-contained)." >&2
 	exit 1
 fi
 
@@ -58,19 +58,19 @@ if ! python3 -c "import requests" 2>/dev/null; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Build the Dart scoring binary from astroplan.
+# 1. Build the Dart scoring binary from the self-contained scoring/ package.
 # ─────────────────────────────────────────────────────────────────────────────
-echo "==> Compiling Dart scoring binary..."
+echo "==> Compiling Dart scoring binary (from vendored scoring/ engine)..."
 mkdir -p "$BIN_DIR"
-# LOAD-BEARING COMMENT — do NOT "simplify" to `dart compile exe`. The
-# astroplan dependency graph (geoengine, drift, etc.) contains packages
-# with build hooks. `dart compile exe` does NOT support build hooks and
-# fails with "does not support build hooks, use 'dart build' instead."
-# `dart build cli` is the correct command and produces a standalone
-# binary in bundle/bin/<entry>. Verified empirically 2026-05-28.
+# LOAD-BEARING COMMENT — do NOT "simplify" to `dart compile exe`. The scoring
+# package's dependency graph (geoengine) contains packages with build hooks.
+# `dart compile exe` does NOT support build hooks and fails with "does not
+# support build hooks, use 'dart build' instead." `dart build cli` is the
+# correct command and produces a standalone binary in bundle/bin/<entry>.
+# Verified 2026-05-28; re-verified for the vendored package 2026-05-31.
 BUILD_TMP="$(mktemp -d -t astrowidget-build.XXXXXX)"
 trap 'rm -rf "$BUILD_TMP"' EXIT
-(cd "$ASTROPLAN_DIR" && dart build cli \
+(cd "$SCORING_DIR" && dart pub get && dart build cli \
 	-t bin/score_location.dart \
 	-o "$BUILD_TMP/")
 cp "$BUILD_TMP/bundle/bin/score_location" "$BIN_DIR/astrowidget-score"

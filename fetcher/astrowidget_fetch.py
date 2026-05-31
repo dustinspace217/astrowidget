@@ -1118,7 +1118,7 @@ def invoke_scoring_binary(payload: dict[str, Any]) -> dict[str, Any]:
 		sys.stderr.write(
 			f"astrowidget: scoring binary not found at {SCORING_BINARY}. "
 			f"Rebuild via:\n"
-			f"  cd ~/Claude/astroplan && dart build cli "
+			f"  cd scoring && dart pub get && dart build cli "
 			f"-t bin/score_location.dart -o /tmp/astrowidget-build && "
 			f"cp /tmp/astrowidget-build/bundle/bin/score_location "
 			f"{SCORING_BINARY}\n"

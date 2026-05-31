@@ -9,8 +9,14 @@ config.toml
 state.json
 state.prev.json
 
-# Compiled binaries (rebuild from astroplan)
+# Compiled binary (rebuild from the in-repo scoring/ package — see scoring/VENDORED.md)
 bin/astrowidget-score
+
+# Dart build artifacts for the vendored scoring engine. The source under
+# scoring/lib + scoring/bin IS tracked; only the build output + tool cache are
+# ignored. scoring/pubspec.lock IS tracked (reproducible builds).
+scoring/build/
+scoring/.dart_tool/
 
 # Internal development documentation — not part of the distributed product
 docs/superpowers/

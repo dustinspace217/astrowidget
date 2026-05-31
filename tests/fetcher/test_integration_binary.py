@@ -11,8 +11,8 @@ real enrichment) with only the two network fetches mocked, and asserts that:
 
 Skips cleanly (not fails) when the binary hasn't been built, so the unit suite
 stays green on a fresh checkout. Build it with:
-  cd ~/Claude/astroplan && dart build cli -t bin/score_location.dart -o /tmp/b \
-    && cp /tmp/b/bundle/bin/score_location ~/Claude/astrowidget/bin/astrowidget-score
+  cd scoring && dart pub get && dart build cli -t bin/score_location.dart -o /tmp/b \
+    && cp /tmp/b/bundle/bin/score_location ../bin/astrowidget-score
 """
 
 import json

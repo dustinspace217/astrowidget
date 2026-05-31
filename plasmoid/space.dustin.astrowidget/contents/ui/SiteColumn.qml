@@ -112,12 +112,19 @@ ColumnLayout {
 		text: {
 			if (!col.night || !col.night.dark_window) return "";
 			const dw = col.night.dark_window;
-			const start = Qt.formatTime(new Date(dw.start), "HH:mm");
+			const startDate = new Date(dw.start);
+			// Qt.formatTime/Date convert the UTC dark_window to the machine's
+			// LOCAL time, so every site reads on the user's own clock (best for
+			// at-a-glance comparison across sites). It was already local — we
+			// add the zone label (Qt "t" → e.g. "PDT") so it can't be mistaken
+			// for UTC, which is what the bare time looked like before.
+			const start = Qt.formatTime(startDate, "HH:mm");
 			const end = Qt.formatTime(new Date(dw.end), "HH:mm");
+			const tz = Qt.formatDateTime(startDate, "t");
 			const hrs = Math.floor(dw.duration_minutes / 60);
 			const mins = dw.duration_minutes % 60;
-			return qsTr("Astro dark: %1 → %2 (%3h %4m)").arg(start).arg(end)
-				.arg(hrs).arg(mins);
+			return qsTr("Astro dark: %1 → %2 %5 (%3h %4m)").arg(start).arg(end)
+				.arg(hrs).arg(mins).arg(tz);
 		}
 		font.pixelSize: Kirigami.Theme.smallFont.pixelSize
 		opacity: 0.85

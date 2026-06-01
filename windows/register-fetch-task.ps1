@@ -52,13 +52,15 @@ param(
 # Fail fast: any cmdlet error aborts the script rather than half-registering.
 $ErrorActionPreference = 'Stop'
 
-# Resolve the fetcher to an absolute path so the task is cwd-independent. The
-# fetcher itself resolves bin/ and config paths from __file__, so no working
-# directory needs to be set on the action.
-$FetcherPath = (Resolve-Path -LiteralPath $FetcherPath).Path
+# Validate BEFORE resolving: with $ErrorActionPreference='Stop', Resolve-Path on
+# a missing path throws its own generic terminating error first, which would
+# make the friendly message below unreachable. So check existence, then resolve
+# to an absolute path (the fetcher resolves bin/ and config paths from __file__,
+# so the task needs no working directory set — only an absolute path here).
 if (-not (Test-Path -LiteralPath $FetcherPath)) {
 	throw "astrowidget: fetcher not found at $FetcherPath"
 }
+$FetcherPath = (Resolve-Path -LiteralPath $FetcherPath).Path
 
 # Pick the Python to run the task with. Prefer pythonw.exe (no console window);
 # fall back to python.exe. Get-Command returns the absolute path Task Scheduler

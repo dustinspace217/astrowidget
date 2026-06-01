@@ -83,3 +83,22 @@ def test_macos_notify_escapes_double_quotes():
 	assert args[1] == "-e"
 	assert args[2].startswith("display notification")
 	assert r'\"go\"' in args[2]  # embedded double-quotes backslash-escaped
+
+
+def test_sanitize_notify_text_strips_control_chars():
+	"""Newlines collapse to spaces and other control chars (C0 + DEL) drop. This
+	is what prevents a newline in a site label from injecting a second AppleScript
+	statement on macOS, or breaking the toast XML on Windows."""
+	assert fx._sanitize_notify_text("a\nb\r\nc") == "a b  c"
+	assert fx._sanitize_notify_text("x\x00\x07\x1f\x7fy") == "xy"
+	assert fx._sanitize_notify_text("clean & <ok>") == "clean & <ok>"
+
+
+def test_notify_sanitizes_before_dispatch():
+	"""_notify strips control characters before any backend sees the text."""
+	with patch.object(fx, "_notify_linux") as lin:
+		with patch.object(fx.sys, "platform", "linux"):
+			fx._notify("Title\nwith newline", "body\x07bell", "normal")
+	title, body, urgency = lin.call_args.args
+	assert title == "Title with newline"
+	assert "\x07" not in body and body == "bodybell"

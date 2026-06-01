@@ -66,12 +66,15 @@ Write-Host '==> Building Dart scoring binary (from vendored scoring/ engine)...'
 # does not support ("use 'dart build' instead"). `dart build cli` is correct and
 # emits a standalone binary under bundle/bin/. Mirrors install.sh.
 $BuildTmp = Join-Path $env:TEMP 'astrowidget-build'
-if (Test-Path -LiteralPath $BuildTmp) { Remove-Item -Recurse -Force $BuildTmp }
+if (Test-Path -LiteralPath $BuildTmp) { Remove-Item -Recurse -Force -LiteralPath $BuildTmp }
 Push-Location $ScoringDir
 try {
 	dart pub get
 	if ($LASTEXITCODE -ne 0) { throw 'dart pub get failed.' }
-	dart build cli -t bin/score_location.dart -o $BuildTmp
+	# Quote the output path: per about_Parsing, a native-command argument that
+	# can contain spaces should be quoted (a build path under "C:\Users\First
+	# Last\..." otherwise risks mis-parsing).
+	dart build cli -t bin/score_location.dart -o "$BuildTmp"
 	if ($LASTEXITCODE -ne 0) { throw 'dart build cli failed.' }
 } finally {
 	Pop-Location
@@ -113,7 +116,7 @@ if (-not $NoFetch) {
 	# Console python here (not pythonw) so any config errors are visible. Don't
 	# abort the install on failure — the config likely still has placeholder
 	# values; the user gets a clear next-step below.
-	& python $Fetcher
+	& python "$Fetcher"
 	if ($LASTEXITCODE -eq 0) {
 		Write-Host '    OK: state.json written'
 	} else {

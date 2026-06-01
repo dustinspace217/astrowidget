@@ -76,9 +76,11 @@ def _generic_cache_dir() -> Path:
 		return Path.home() / "Library" / "Caches"
 	# Linux / other XDG platforms. Qt honors XDG_CACHE_HOME when set, so we
 	# match it — otherwise a user who relocated their cache would desync the
-	# two apps (fetcher writing one place, desktop app reading another).
+	# two apps (fetcher writing one place, desktop app reading another). The XDG
+	# spec says a relative XDG_CACHE_HOME must be ignored; require an absolute
+	# path so a stray relative value can't desync the two under different CWDs.
 	xdg = os.environ.get("XDG_CACHE_HOME")
-	return Path(xdg) if xdg else Path.home() / ".cache"
+	return Path(xdg) if xdg and os.path.isabs(xdg) else Path.home() / ".cache"
 
 
 # Canonical paths. CONFIG is an XDG-style dotfolder on every OS (the fetcher is
@@ -95,9 +97,15 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # Windows executables need the .exe suffix for subprocess to locate them
 # (CreateProcess does not auto-append it for an absolute path). `dart build cli`
 # on Windows produces score_location.exe, which install.ps1 copies to
-# bin/astrowidget-score.exe. On Linux/macOS the binary has no suffix.
-_SCORE_EXE = "astrowidget-score.exe" if sys.platform == "win32" else "astrowidget-score"
-SCORING_BINARY = SCRIPT_DIR.parent / "bin" / _SCORE_EXE
+# bin/astrowidget-score.exe.
+def _score_exe_name(platform: str) -> str:
+	"""The scoring binary's filename for a given sys.platform value — .exe on
+	Windows (CreateProcess needs the suffix for an absolute path), bare on
+	Linux/macOS. A pure function of the platform string so both branches test."""
+	return "astrowidget-score.exe" if platform == "win32" else "astrowidget-score"
+
+
+SCORING_BINARY = SCRIPT_DIR.parent / "bin" / _score_exe_name(sys.platform)
 
 # Astrospheric API endpoint — verified from official docs 2026-05-28.
 # https://www.astrospheric.com/dynamiccontent/api_info.html
@@ -1178,10 +1186,11 @@ def invoke_scoring_binary(payload: dict[str, Any]) -> dict[str, Any]:
 	try:
 		# stdout is captured (we parse it). On Linux the fetcher runs under
 		# systemd, so inheriting stderr (None) routes the binary's diagnostics to
-		# the journal. On Windows under pythonw there is no valid inherited stderr
-		# handle and no journal, so discard the child's stderr (DEVNULL) rather
-		# than hand it a possibly-invalid handle.
-		score_stderr = subprocess.DEVNULL if sys.platform == "win32" else None
+		# the journal. On Windows the inherited OS stderr handle is invalid under
+		# pythonw, but main() has rebound sys.stderr to a real log file — pass
+		# that explicit handle so the Dart binary's diagnostics land in the log
+		# instead of being discarded.
+		score_stderr = sys.stderr if sys.platform == "win32" else None
 		proc = subprocess.run(
 			[str(SCORING_BINARY)],
 			input=json.dumps(payload).encode("utf-8"),
@@ -1203,8 +1212,8 @@ def invoke_scoring_binary(payload: dict[str, Any]) -> dict[str, Any]:
 		)
 		_notify(
 			"Scoring binary failed",
-			f"Exit code {e.returncode}. "
-			f"See journalctl --user-unit=astrowidget-fetch.",
+			f"Exit code {e.returncode}. Run the fetcher manually to see the "
+			f"binary's output.",
 			urgency="critical",
 		)
 		sys.exit(4)
@@ -1218,7 +1227,8 @@ def invoke_scoring_binary(payload: dict[str, Any]) -> dict[str, Any]:
 		# "every persistent error emits exactly one user-visible notification."
 		_notify(
 			"Scoring binary output malformed",
-			"The Dart binary returned non-JSON. Check journalctl for details.",
+			"The Dart binary returned non-JSON. Run the fetcher manually to see "
+			"its output.",
 			urgency="critical",
 		)
 		sys.exit(4)
@@ -1260,15 +1270,21 @@ def write_state(new_state: dict[str, Any]) -> None:
 			prev_tmp = PREV_STATE_PATH.with_suffix(".json.tmp")
 			prev_tmp.write_bytes(old_bytes)
 			os.chmod(prev_tmp, 0o600)
-			os.rename(prev_tmp, PREV_STATE_PATH)
+			# os.replace, NOT os.rename: it atomically overwrites an existing
+			# destination on BOTH POSIX and Windows. os.rename raises
+			# FileExistsError on Windows when the target already exists.
+			os.replace(prev_tmp, PREV_STATE_PATH)
 
 	tmp = STATE_PATH.with_suffix(".json.tmp")
 	tmp.write_text(json.dumps(new_state, indent=2), encoding="utf-8")
-	# Restrict perms BEFORE the rename so the atomic visible state is
-	# already protected. os.chmod on the tmp file then rename guarantees
-	# no window where the file is world-readable.
+	# Restrict perms BEFORE the replace so the atomic visible state is already
+	# protected. os.chmod on the tmp file then replace guarantees no window
+	# where the file is world-readable.
 	os.chmod(tmp, 0o600)
-	os.rename(tmp, STATE_PATH)
+	# os.replace, NOT os.rename: atomic overwrite on BOTH POSIX and Windows.
+	# os.rename raises FileExistsError on Windows once state.json exists — i.e.
+	# every run after the first, which would freeze the widget's data silently.
+	os.replace(tmp, STATE_PATH)
 
 
 def load_prev_state() -> dict[str, Any] | None:
@@ -1399,6 +1415,18 @@ def emit_notifications(
 	new["astroDarkNotifiedFor"] = dark_notified
 
 
+def _sanitize_notify_text(s: str) -> str:
+	"""
+	Make a string safe for every notification backend: collapse newlines to
+	spaces and drop other control characters (C0 + DEL). A raw newline would let
+	a site label inject a second AppleScript statement via osascript on macOS,
+	and XML 1.0 rejects C0 controls (even when escaped), which would break the
+	Windows toast. Notifications are single-line, so this loses nothing real.
+	"""
+	s = s.replace("\r", " ").replace("\n", " ")
+	return "".join(c for c in s if c >= " " and c != "\x7f")
+
+
 def _notify(title: str, body: str, urgency: str = "normal") -> None:
 	"""
 	Sends a best-effort desktop notification, dispatched per OS. A missing or
@@ -1416,6 +1444,11 @@ def _notify(title: str, body: str, urgency: str = "normal") -> None:
 	  - macOS  : osascript 'display notification' (keeps run.py's advertised
 	             macOS support honest — the desktop app already runs there).
 	"""
+	# Notifications are single-line UI. Sanitize first so a control character in
+	# a site label can't inject AppleScript on macOS or break the toast XML on
+	# Windows — one guard covers all three backends at the dispatch boundary.
+	title = _sanitize_notify_text(title)
+	body = _sanitize_notify_text(body)
 	try:
 		if sys.platform == "win32":
 			_notify_windows(title, body)
@@ -1423,13 +1456,16 @@ def _notify(title: str, body: str, urgency: str = "normal") -> None:
 			_notify_macos(title, body)
 		else:
 			_notify_linux(title, body, urgency)
-	except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-		# Any notifier problem (binary absent, timeout, spawn failure) degrades
-		# to a stderr line rather than crashing the fetch. Same philosophy as the
-		# original Linux-only path: notifications are a convenience, not a
-		# correctness requirement.
+	except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+		# A notifier problem (binary absent, timeout, spawn failure) degrades to a
+		# stderr line rather than crashing the fetch — notifications are a
+		# convenience, not a correctness requirement. The exception TYPE is logged
+		# so a masked logic bug (e.g. an OSError-family error raised while building
+		# the Windows toast) is identifiable, not silently indistinguishable from a
+		# benign missing notifier.
 		sys.stderr.write(
-			f"astrowidget: notifier unavailable [{urgency}] {title}: {body}\n"
+			f"astrowidget: notifier unavailable [{type(e).__name__}] "
+			f"[{urgency}] {title}: {body}\n"
 		)
 
 
@@ -1627,13 +1663,23 @@ def main() -> int:
 	# flash a console window 4x/day), sys.stdout/sys.stderr can be None — the
 	# Python docs note this for GUI hosts with no console attached. Several paths
 	# below write to sys.stderr (error logging, the notifier fallback), and
-	# writing to None would crash the run. Bind the null device so that logging
-	# is always safe. No-op on Linux/macOS and on console Python, where the
-	# standard streams are never None.
-	if sys.stderr is None:
-		sys.stderr = open(os.devnull, "w", encoding="utf-8")
-	if sys.stdout is None:
-		sys.stdout = open(os.devnull, "w", encoding="utf-8")
+	# writing to None would crash the run. No-op on Linux/macOS and on console
+	# Python, where the standard streams are never None.
+	if sys.stderr is None or sys.stdout is None:
+		# Route diagnostics to a log file under the cache dir so the scheduled
+		# Windows run still has a durable trail (the systemd-journal equivalent).
+		# Truncate per run so the log always reflects the latest run and never
+		# grows without bound. A failed open() must not abort the fetch — fall
+		# back to the null device.
+		try:
+			CACHE_DIR.mkdir(parents=True, exist_ok=True)
+			_null_log = open(CACHE_DIR / "fetch.log", "w", encoding="utf-8")
+		except OSError:
+			_null_log = open(os.devnull, "w", encoding="utf-8")
+		if sys.stderr is None:
+			sys.stderr = _null_log
+		if sys.stdout is None:
+			sys.stdout = _null_log
 
 	cfg = load_config()
 	api_key = cfg["api"]["astrospheric_key"]

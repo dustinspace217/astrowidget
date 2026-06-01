@@ -92,7 +92,12 @@ PREV_STATE_PATH = CACHE_DIR / "state.prev.json"
 # The Dart binary lives next to this script's parent (bin/ peer of fetcher/).
 # Resolved relative to this file so the install location is movable.
 SCRIPT_DIR = Path(__file__).resolve().parent
-SCORING_BINARY = SCRIPT_DIR.parent / "bin" / "astrowidget-score"
+# Windows executables need the .exe suffix for subprocess to locate them
+# (CreateProcess does not auto-append it for an absolute path). `dart build cli`
+# on Windows produces score_location.exe, which install.ps1 copies to
+# bin/astrowidget-score.exe. On Linux/macOS the binary has no suffix.
+_SCORE_EXE = "astrowidget-score.exe" if sys.platform == "win32" else "astrowidget-score"
+SCORING_BINARY = SCRIPT_DIR.parent / "bin" / _SCORE_EXE
 
 # Astrospheric API endpoint — verified from official docs 2026-05-28.
 # https://www.astrospheric.com/dynamiccontent/api_info.html
@@ -265,13 +270,19 @@ def load_config() -> dict[str, Any]:
 		)
 
 	# Permission check — refuse world-readable configs (could leak the API key).
-	st = CONFIG_PATH.stat()
-	mode = stat.S_IMODE(st.st_mode)
-	if mode & 0o077:  # any group/other bits set
-		_fail_config(
-			"Configuration permissions too open",
-			f"{CONFIG_PATH} must be chmod 600. Current mode: {oct(mode)}.",
-		)
+	# Unix only: st_mode permission bits are a POSIX concept. On Windows os.stat
+	# reports synthetic bits (usually 0o666) that don't reflect the real ACL, so
+	# the 0o077 test would reject every config. Windows file privacy comes from
+	# NTFS ACLs + the file living under the user profile, so we skip the bitmask
+	# check there rather than enforce one that can never pass.
+	if sys.platform != "win32":
+		st = CONFIG_PATH.stat()
+		mode = stat.S_IMODE(st.st_mode)
+		if mode & 0o077:  # any group/other bits set
+			_fail_config(
+				"Configuration permissions too open",
+				f"{CONFIG_PATH} must be chmod 600. Current mode: {oct(mode)}.",
+			)
 
 	try:
 		with CONFIG_PATH.open("rb") as f:
@@ -1148,13 +1159,14 @@ def invoke_scoring_binary(payload: dict[str, Any]) -> dict[str, Any]:
 	Exits: code 4 on subprocess failure or timeout — emits notify-send.
 	"""
 	if not SCORING_BINARY.exists():
+		# Point at the OS-appropriate installer (the canonical rebuild path) plus
+		# the manual 'dart build cli' route documented in the README. The previous
+		# message hardcoded a Linux `cp` command that was wrong on Windows.
+		installer = "windows\\install.ps1" if sys.platform == "win32" else "install.sh"
 		sys.stderr.write(
-			f"astrowidget: scoring binary not found at {SCORING_BINARY}. "
-			f"Rebuild via:\n"
-			f"  cd scoring && dart pub get && dart build cli "
-			f"-t bin/score_location.dart -o /tmp/astrowidget-build && "
-			f"cp /tmp/astrowidget-build/bundle/bin/score_location "
-			f"{SCORING_BINARY}\n"
+			f"astrowidget: scoring binary not found at {SCORING_BINARY}.\n"
+			f"Build it by re-running the installer ({installer}), or manually with "
+			f"'dart build cli' from the scoring/ package (see README).\n"
 		)
 		_notify(
 			"Scoring binary missing",
@@ -1164,13 +1176,17 @@ def invoke_scoring_binary(payload: dict[str, Any]) -> dict[str, Any]:
 		sys.exit(4)
 
 	try:
-		# stdout captured (we parse it); stderr passed through to journal
-		# so diagnostic warnings reach the user via journalctl.
+		# stdout is captured (we parse it). On Linux the fetcher runs under
+		# systemd, so inheriting stderr (None) routes the binary's diagnostics to
+		# the journal. On Windows under pythonw there is no valid inherited stderr
+		# handle and no journal, so discard the child's stderr (DEVNULL) rather
+		# than hand it a possibly-invalid handle.
+		score_stderr = subprocess.DEVNULL if sys.platform == "win32" else None
 		proc = subprocess.run(
 			[str(SCORING_BINARY)],
 			input=json.dumps(payload).encode("utf-8"),
 			stdout=subprocess.PIPE,
-			stderr=None,  # inherits parent stderr → journal
+			stderr=score_stderr,
 			timeout=SCORING_TIMEOUT,
 			check=True,
 		)
@@ -1607,6 +1623,18 @@ def main() -> int:
 	6. Diff vs. prev and emit notifications.
 	Returns: 0 on success.
 	"""
+	# Under Windows' pythonw.exe (which the scheduled task uses so it doesn't
+	# flash a console window 4x/day), sys.stdout/sys.stderr can be None — the
+	# Python docs note this for GUI hosts with no console attached. Several paths
+	# below write to sys.stderr (error logging, the notifier fallback), and
+	# writing to None would crash the run. Bind the null device so that logging
+	# is always safe. No-op on Linux/macOS and on console Python, where the
+	# standard streams are never None.
+	if sys.stderr is None:
+		sys.stderr = open(os.devnull, "w", encoding="utf-8")
+	if sys.stdout is None:
+		sys.stdout = open(os.devnull, "w", encoding="utf-8")
+
 	cfg = load_config()
 	api_key = cfg["api"]["astrospheric_key"]
 	sites_cfg = cfg["sites"]

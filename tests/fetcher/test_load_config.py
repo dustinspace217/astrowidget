@@ -91,6 +91,19 @@ def test_load_config_world_readable_rejected(tmp_path, monkeypatch):
 		f"expected permission-specific notification title, got: {title!r}"
 
 
+def test_load_config_skips_perm_check_on_windows(tmp_path, monkeypatch):
+	"""On Windows the 0600 perm check is skipped — st_mode permission bits are a
+	POSIX concept and os.stat reports synthetic bits there, so the 0o077 test
+	would reject every config. A 'world-readable' config must load instead of
+	being rejected, or the fetcher could never start on Windows."""
+	cfg_path = _write_config(tmp_path, VALID_CONFIG, mode=0o644)
+	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
+	monkeypatch.setattr(fx.sys, "platform", "win32")
+	with patch.object(fx, "_notify"):
+		cfg = fx.load_config()  # must NOT raise SystemExit on perms
+	assert cfg["api"]["astrospheric_key"] == "fake-key-for-tests"
+
+
 def test_load_config_missing_api_key_rejected(tmp_path, monkeypatch):
 	"""Empty astrospheric_key → exit 2."""
 	cfg = VALID_CONFIG.replace('"fake-key-for-tests"', '""')

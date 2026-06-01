@@ -50,9 +50,41 @@ _TZ_OFFSET_RE = re.compile(r"[+-]\d{2}:?\d{2}$")
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Canonical paths. XDG-compliant; the plasmoid reads from CACHE_DIR/state.json.
+def _generic_cache_dir() -> Path:
+	"""
+	Resolve the OS cache directory matching Qt's
+	QStandardPaths::GenericCacheLocation, so the cross-platform desktop app
+	(desktop/, which reads state.json through that Qt API) and this fetcher
+	agree on where state.json lives — on every platform, not just Linux.
+
+	Qt's GenericCacheLocation, from the Qt 6 docs table (verified 2026-05-31):
+	    Windows  ->  %LOCALAPPDATA%\\cache  (C:\\Users\\<u>\\AppData\\Local\\cache)
+	    macOS    ->  ~/Library/Caches
+	    Linux    ->  $XDG_CACHE_HOME, else ~/.cache
+
+	sys.platform is "win32" on all Windows, "darwin" on macOS, "linux" on Linux.
+	Returns the GENERIC cache root; the caller appends the "astrowidget" subdir.
+	"""
+	if sys.platform == "win32":
+		# %LOCALAPPDATA% is set in any normal user session; fall back to its
+		# documented default layout only if the variable is somehow absent.
+		local = os.environ.get("LOCALAPPDATA")
+		base = Path(local) if local else Path.home() / "AppData" / "Local"
+		return base / "cache"
+	if sys.platform == "darwin":
+		return Path.home() / "Library" / "Caches"
+	# Linux / other XDG platforms. Qt honors XDG_CACHE_HOME when set, so we
+	# match it — otherwise a user who relocated their cache would desync the
+	# two apps (fetcher writing one place, desktop app reading another).
+	xdg = os.environ.get("XDG_CACHE_HOME")
+	return Path(xdg) if xdg else Path.home() / ".cache"
+
+
+# Canonical paths. CONFIG is an XDG-style dotfolder on every OS (the fetcher is
+# its SOLE reader, so it needs no cross-process / per-OS mapping). CACHE tracks
+# Qt's GenericCacheLocation per-OS so the desktop app finds the same state.json.
 CONFIG_PATH = Path.home() / ".config" / "astrowidget" / "config.toml"
-CACHE_DIR = Path.home() / ".cache" / "astrowidget"
+CACHE_DIR = _generic_cache_dir() / "astrowidget"
 STATE_PATH = CACHE_DIR / "state.json"
 PREV_STATE_PATH = CACHE_DIR / "state.prev.json"
 

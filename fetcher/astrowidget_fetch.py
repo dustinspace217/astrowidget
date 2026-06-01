@@ -1191,6 +1191,11 @@ def invoke_scoring_binary(payload: dict[str, Any]) -> dict[str, Any]:
 		# that explicit handle so the Dart binary's diagnostics land in the log
 		# instead of being discarded.
 		score_stderr = sys.stderr if sys.platform == "win32" else None
+		if score_stderr is not None:
+			# Flush our buffered writes first: the child shares this fd, so any
+			# unflushed parent text could otherwise interleave with or clobber the
+			# binary's stderr in the log file.
+			score_stderr.flush()
 		proc = subprocess.run(
 			[str(SCORING_BINARY)],
 			input=json.dumps(payload).encode("utf-8"),

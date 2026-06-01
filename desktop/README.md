@@ -49,7 +49,6 @@ two.
 ## Windows scheduling + notifications
 
 The Python fetcher is cross-platform, but the Linux setup uses a systemd timer +
-`notify-send`. On Windows it runs under **Task Scheduler** with Windows toast
-notifications, and the Dart scoring binary is built on Windows with the same
-`dart build cli` command from `scoring/`. Those Windows-specific scripts are the
-next piece to land (this commit delivers the cross-platform UI).
+`notify-send`. On Windows it runs under **Task Scheduler** with WinRT toast
+notifications, built and scheduled by `windows\install.ps1`. See
+**[WINDOWS.md](../WINDOWS.md)** for the full Windows setup.

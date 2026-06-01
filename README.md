@@ -74,6 +74,14 @@ chmod 600 ~/.config/astrowidget/config.toml
 
 A combined `install.sh` runs all of the above.
 
+## Windows & macOS
+
+The KDE plasmoid is Linux-only, but the fetcher, the scoring engine, and a
+cross-platform **Qt 6 desktop window** run on Windows and macOS too. See
+**[WINDOWS.md](WINDOWS.md)** for the Windows setup (Task Scheduler scheduling,
+toast notifications, and the desktop app), and `desktop/README.md` for the
+window itself.
+
 ## Configuration
 
 See `config.example.toml` for the full template. Minimum to get running:
@@ -103,13 +111,17 @@ suppressed during dark hours by default — that's the point of it.
 ```
 astrowidget/
 ├── fetcher/                              # Python fetcher (Astrospheric + Open-Meteo)
+├── scoring/                              # Vendored, self-contained Dart scoring engine
 ├── bin/                                  # Compiled Dart scoring binary (gitignored)
-├── plasmoid/space.dustin.astrowidget/    # QML plasmoid package
-├── systemd/                              # User-level systemd unit files
+├── plasmoid/space.dustin.astrowidget/    # QML plasmoid package (Linux / Plasma)
+├── desktop/                              # Cross-platform Qt 6 desktop app (Win/macOS/Linux)
+├── systemd/                              # User-level systemd unit files (Linux)
+├── windows/                              # Windows installer + Task Scheduler script
 ├── tests/                                # pytest suite
 ├── docs/design/                          # Public design documentation
 ├── config.example.toml                   # Configuration template
-├── install.sh                            # All-in-one installer
+├── install.sh                            # Linux all-in-one installer
+├── WINDOWS.md                            # Windows / macOS setup guide
 ├── LICENSE                               # GPL-3.0-or-later
 └── README.md
 ```

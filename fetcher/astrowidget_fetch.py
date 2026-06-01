@@ -27,6 +27,7 @@ Why this is a single script rather than a package:
 # installation surface small and avoids a virtualenv requirement.
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -1384,28 +1385,168 @@ def emit_notifications(
 
 def _notify(title: str, body: str, urgency: str = "normal") -> None:
 	"""
-	Sends a desktop notification via notify-send. notify-send unavailable is
-	logged but not fatal — the fetcher proceeds. For critical notifications
-	the stderr message is louder so missing notify-send doesn't fully hide
-	a config failure (journal still captures stderr).
+	Sends a best-effort desktop notification, dispatched per OS. A missing or
+	failed notifier is logged to stderr but is NEVER fatal — the fetcher
+	proceeds. The stderr fallback still records the message so a missing
+	notifier can't fully hide a config failure (the systemd journal on Linux /
+	the console + Event Log on Windows capture stderr).
+
+	`urgency` is "normal" or "critical"; only Linux's notify-send has a direct
+	urgency concept, so it's passed there and ignored on the other platforms.
+
+	Per-OS backends (see the _notify_* helpers below):
+	  - Linux  : notify-send (libnotify) — the original mechanism, unchanged.
+	  - Windows: a WinRT toast via built-in PowerShell, no third-party module.
+	  - macOS  : osascript 'display notification' (keeps run.py's advertised
+	             macOS support honest — the desktop app already runs there).
 	"""
 	try:
-		subprocess.run(
-			[
-				"notify-send",
-				"--app-name=astrowidget",
-				"--icon=weather-clear-night",
-				f"--urgency={urgency}",
-				title,
-				body,
-			],
-			check=False,
-			timeout=5,
-		)
-	except (FileNotFoundError, subprocess.TimeoutExpired):
+		if sys.platform == "win32":
+			_notify_windows(title, body)
+		elif sys.platform == "darwin":
+			_notify_macos(title, body)
+		else:
+			_notify_linux(title, body, urgency)
+	except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+		# Any notifier problem (binary absent, timeout, spawn failure) degrades
+		# to a stderr line rather than crashing the fetch. Same philosophy as the
+		# original Linux-only path: notifications are a convenience, not a
+		# correctness requirement.
 		sys.stderr.write(
-			f"astrowidget: notify-send unavailable [{urgency}] {title}: {body}\n"
+			f"astrowidget: notifier unavailable [{urgency}] {title}: {body}\n"
 		)
+
+
+def _notify_linux(title: str, body: str, urgency: str) -> None:
+	"""Linux desktop notification via libnotify's notify-send (the original)."""
+	subprocess.run(
+		[
+			"notify-send",
+			"--app-name=astrowidget",
+			"--icon=weather-clear-night",
+			f"--urgency={urgency}",
+			title,
+			body,
+		],
+		check=False,
+		timeout=5,
+	)
+
+
+def _notify_macos(title: str, body: str) -> None:
+	"""
+	macOS notification via osascript. AppleScript string literals are double-
+	quoted, so a literal backslash or double-quote in the text must be escaped —
+	backslash FIRST, then the quote, otherwise the quote-escape's own backslash
+	gets doubled.
+	"""
+	t = title.replace("\\", "\\\\").replace('"', '\\"')
+	b = body.replace("\\", "\\\\").replace('"', '\\"')
+	subprocess.run(
+		["osascript", "-e", f'display notification "{b}" with title "{t}"'],
+		check=False,
+		timeout=5,
+	)
+
+
+def _xml_escape(s: str) -> str:
+	"""
+	Escape the XML special chars that matter inside element text. `&` MUST be
+	replaced first, or the `&` it introduces in `&lt;`/`&gt;` gets re-escaped.
+	Quotes need no escaping here because user text only goes in <text> ELEMENTS,
+	never in attributes — so & < > suffice.
+	"""
+	return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _windows_toast_script(title: str, body: str) -> str:
+	"""
+	Build the PowerShell (WinRT) script that shows exactly one toast. Kept
+	separate from the subprocess call so the script-building — the only part of
+	the Windows path that can be checked without a Windows host — is unit
+	testable on Linux. _notify_windows base64-encodes and runs the result.
+
+	Escaping: XML-escape the user text for the toast's <text> elements, then
+	double any single quote so the XML survives the surrounding PowerShell
+	single-quoted string literal passed to LoadXml().
+	"""
+	xml = (
+		'<toast><visual><binding template="ToastGeneric">'
+		f"<text>{_xml_escape(title)}</text><text>{_xml_escape(body)}</text>"
+		"</binding></visual></toast>"
+	).replace("'", "''")
+	# AppUserModelID = Windows PowerShell's own built-in Start-menu identity,
+	# present on every default Win10/11 install. Attributing the toast to an
+	# already-registered app means it shows without us pre-creating a shortcut;
+	# the source label reads "Windows PowerShell". A custom branded AUMID is
+	# deliberately left out for now — a toast that reliably appears beats a
+	# branded one that might not. Raw string: the backslashes are literal.
+	app_id = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
+	# WinRT type projection in Windows PowerShell 5.1 uses the three-part
+	# [Type, Assembly, ContentType=WindowsRuntime] form. ::New() constructs;
+	# CreateToastNotifier($AppId).Show($toast) displays it.
+	return (
+		"$ErrorActionPreference='Stop';"
+		f"$AppId='{app_id}';"
+		"$x=[Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime]::New();"
+		f"$x.LoadXml('{xml}');"
+		"$t=[Windows.UI.Notifications.ToastNotification,Windows.UI.Notifications,ContentType=WindowsRuntime]::New($x);"
+		"[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]::CreateToastNotifier($AppId).Show($t);"
+	)
+
+
+def _notify_windows(title: str, body: str) -> None:
+	"""
+	Windows toast via the built-in WinRT ToastNotificationManager, driven by
+	Windows PowerShell (powershell.exe / 5.1, present on every Windows 10/11).
+	Uses NO third-party module, preserving the project's "Python stdlib +
+	requests only" install surface — the toast machinery lives entirely on the
+	PowerShell/WinRT side; Python only spawns it.
+
+	Why WinRT and not the alternatives (researched 2026-05-31):
+	  - BurntToast is more ergonomic but needs `Install-Module BurntToast`, an
+	    extra dependency the user must add — against the minimal-install ethic.
+	  - System.Windows.Forms NotifyIcon balloons are flaky: they silently fail
+	    to render if the spawning process exits too quickly, and modern Windows
+	    ignores their timeout.
+	  - WinRT is the native path, present by default, and the most likely to
+	    work on a first, untested run.
+
+	IMPORTANT — untestable from this (Linux) machine; needs on-Windows
+	verification. The toast only DISPLAYS when the fetcher runs in the logged-in
+	user's interactive session. The scheduled task MUST use "Run only when user
+	is logged on" — under Session 0 isolation the toast is created but never
+	shown. install.ps1 configures the task that way and the Windows docs call it
+	out. If a toast still doesn't appear, the first thing to toggle is the `-Sta`
+	flag below (WinRT wants a single-threaded apartment; this is the one detail
+	the research could not empirically confirm).
+
+	Delivery: the script is passed via -EncodedCommand (base64 of UTF-16LE),
+	NOT -Command. That sidesteps PowerShell's notorious command-line quoting
+	rules entirely — the script can contain quotes, braces, and XML freely with
+	no shell-escaping layer to get wrong. The only escaping that remains is the
+	content escaping done in _windows_toast_script().
+	"""
+	# -EncodedCommand expects base64 of the UTF-16LE (little-endian) script.
+	encoded = base64.b64encode(
+		_windows_toast_script(title, body).encode("utf-16-le")
+	).decode("ascii")
+	subprocess.run(
+		[
+			"powershell",
+			"-NoProfile",
+			"-NonInteractive",
+			"-Sta",
+			"-EncodedCommand",
+			encoded,
+		],
+		check=False,
+		timeout=10,
+		# CREATE_NO_WINDOW suppresses the console flash on Windows; getattr keeps
+		# this safe on non-Windows where the flag doesn't exist (this helper is
+		# only reached on win32, but the attribute is resolved defensively).
+		creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+	)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

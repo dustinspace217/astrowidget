@@ -299,12 +299,10 @@ def load_config() -> dict[str, Any]:
 		_fail_config("Configuration parse error", str(e))
 
 	# Validate required fields. Fail loud with actionable messages.
-	api_key = cfg.get("api", {}).get("astrospheric_key", "")
-	if not api_key:
-		_fail_config(
-			"Astrospheric API key missing",
-			f"Set [api].astrospheric_key in {CONFIG_PATH}.",
-		)
+	# The Astrospheric API key is OPTIONAL (no hard fail): in-domain sites use it
+	# when present and fall back to Open-Meteo + 7Timer — with a dismissable UI
+	# notice — when it's absent or rejected. A config with no key, or only
+	# out-of-domain sites, runs fine on the free sources. main() reads the key.
 
 	sites = cfg.get("sites", [])
 	if not sites:
@@ -313,24 +311,9 @@ def load_config() -> dict[str, Any]:
 			f"Add at least one [[sites]] block to {CONFIG_PATH}.",
 		)
 
-	# Astrospheric credit-budget warning. Only sites with use_astrospheric=true
-	# spend credits; international sites are free (7Timer + Open-Meteo). The
-	# pre-expansion check counted ALL sites and would over-warn after the 7-site
-	# expansion (7 sites → "140 credits/day" when only the NA sites cost any).
-	# We read the raw flag here; the per-site loop below sets its default and
-	# rejects non-boolean values, so a valid config always counts correctly.
-	_as_sites = sum(1 for s in sites if s.get("use_astrospheric", True))
-	_credit_budget = int(cfg.get("api", {}).get("astrospheric_daily_credit_budget", 100))
-	_runs_per_day = 4  # systemd timer fires 4×/day, aligned to Astrospheric's 6h refresh
-	_daily_credits = ASTROSPHERIC_CREDIT_COST_PER_CALL * _as_sites * _runs_per_day
-	if _credit_budget > 0 and _daily_credits > _credit_budget:
-		sys.stderr.write(
-			f"astrowidget: WARNING: {_as_sites} Astrospheric site(s) cost "
-			f"{_daily_credits} credits/day ({ASTROSPHERIC_CREDIT_COST_PER_CALL}"
-			f" × {_as_sites} sites × {_runs_per_day} runs), over your "
-			f"{_credit_budget}/day budget. Reduce Astrospheric sites or raise "
-			f"[api].astrospheric_daily_credit_budget.\n"
-		)
+	# (The upfront credit-budget warning was removed: which sites use Astrospheric
+	# is now derived from lat/lon, an over-budget run fails gracefully per-site
+	# with a dismissable notice, and main() still tracks usage + warns at 80%.)
 
 	# Duplicate site-id check — the state.json shape uses id as the key for
 	# the scoring-output merge, so duplicates silently collide otherwise.
@@ -355,27 +338,19 @@ def load_config() -> dict[str, Any]:
 				f"Edit {CONFIG_PATH} with real coordinates.",
 			)
 
-		# Source/visibility flags (added for the 7-site multi-source expansion).
-		#   primary: shown as a full always-on column (true) vs a collapsed,
-		#     click-to-expand verdict chip (false).
-		#   use_astrospheric: North-America sites (true) fetch the Astrospheric
-		#     Pro feed and score cloud on the AS + Open-Meteo ensemble.
-		#     International sites (false) SKIP Astrospheric — its API errors
-		#     outside the North-America/RDPS domain — and use 7Timer for
-		#     seeing/transparency plus Open-Meteo for cloud/precip/wind.
-		# Both default true so existing NA-only configs keep their behavior.
-		# A non-bool value is rejected loudly: the string "false" is truthy in
-		# Python, so a typo would silently enable Astrospheric on an
-		# out-of-domain site and produce per-site errors on every run.
-		for _flag in ("primary", "use_astrospheric"):
-			if _flag in site and not isinstance(site[_flag], bool):
-				_fail_config(
-					f"Invalid '{_flag}' for site '{sid}'",
-					f"{_flag} must be the TOML boolean true or false, "
-					f"got {site[_flag]!r}.",
-				)
+		# The `primary` flag: a full always-on column (true) vs a collapsed,
+		# click-to-expand verdict chip (false). Defaults true. A non-bool value is
+		# rejected loudly — the string "false" is truthy in Python, so a typo
+		# would otherwise silently flip the layout.
+		# (Astrospheric eligibility is derived from lat/lon — see
+		# _in_astrospheric_domain — so there is no use_astrospheric flag.)
+		if "primary" in site and not isinstance(site["primary"], bool):
+			_fail_config(
+				f"Invalid 'primary' for site '{sid}'",
+				f"primary must be the TOML boolean true or false, "
+				f"got {site['primary']!r}.",
+			)
 		site["primary"] = bool(site.get("primary", True))
-		site["use_astrospheric"] = bool(site.get("use_astrospheric", True))
 
 	# Per-site veto threshold validation. Adversarial review flagged that
 	# wind_max_kmh = -5 (etc.) silently produces "Neither" for every hour —
@@ -423,6 +398,23 @@ def _fail_config(title: str, body: str) -> None:
 # API fetchers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _in_astrospheric_domain(lat: float, lon: float) -> bool:
+	"""
+	True if (lat, lon) is inside Astrospheric's coverage. Astrospheric is built
+	on Environment Canada's RDPS regional model, which covers North America only,
+	so we use a generous North-America bounding box (CONUS, Canada, Alaska,
+	Hawaii, Mexico). Out-of-box sites use Open-Meteo + 7Timer with no Astrospheric
+	attempt and no warning; in-box sites attempt Astrospheric and, if it fails
+	(edge of coverage, key, outage), fall back with a dismissable UI notice.
+
+	The box is deliberately generous: too tight would silently drop paid
+	Astrospheric data the user is owed, whereas too loose only ever shows a
+	one-time dismissable notice where Astrospheric can't actually serve. The live
+	fetch is the real check; this box only decides whether to attempt it.
+	"""
+	return 14.0 <= lat <= 84.0 and -170.0 <= lon <= -50.0
+
+
 def fetch_astrospheric(api_key: str, lat: float, lon: float) -> dict[str, Any]:
 	"""
 	POSTs to Astrospheric's GetForecastData_V1 endpoint and returns the parsed
@@ -459,7 +451,8 @@ def fetch_astrospheric(api_key: str, lat: float, lon: float) -> dict[str, Any]:
 				continue
 			raise AstrosphericFetchError(
 				f"Astrospheric fetch failed ({last_exc_type}, details "
-				f"suppressed to protect API key)"
+				f"suppressed to protect API key)",
+				code="network",
 			) from None
 
 		# 5xx → retry once. 4xx → fail fast (auth errors are not transient).
@@ -471,9 +464,13 @@ def fetch_astrospheric(api_key: str, lat: float, lon: float) -> dict[str, Any]:
 			r.raise_for_status()
 		except requests.HTTPError as e:
 			last_exc_type = type(e).__name__
+			# 403 (key rejected) is the common case and gets its own code so the
+			# user can dismiss it specifically; other statuses bucket by class.
+			code = "http_403" if r.status_code == 403 else f"http_{r.status_code // 100}xx"
 			raise AstrosphericFetchError(
 				f"Astrospheric returned HTTP {r.status_code} (details "
-				f"suppressed to protect API key)"
+				f"suppressed to protect API key)",
+				code=code,
 			) from None
 
 		# Parse the JSON body. JSONDecodeError surfaces as a shape error.
@@ -481,7 +478,7 @@ def fetch_astrospheric(api_key: str, lat: float, lon: float) -> dict[str, Any]:
 			parsed = r.json()
 		except ValueError:
 			raise AstrosphericFetchError(
-				"Astrospheric response was not valid JSON"
+				"Astrospheric response was not valid JSON", code="bad_json"
 			) from None
 
 		# Validate response shape — Astrospheric (and APIs generally) may
@@ -489,20 +486,36 @@ def fetch_astrospheric(api_key: str, lat: float, lon: float) -> dict[str, Any]:
 		# before letting fabricated defaults flow downstream into scoring.
 		if not isinstance(parsed, dict):
 			raise AstrosphericFetchError(
-				"Astrospheric returned non-dict response (likely error body)"
+				"Astrospheric returned non-dict response (likely error body)",
+				code="no_data",
 			)
 		missing = [k for k in ASTROSPHERIC_REQUIRED_KEYS if k not in parsed]
 		if missing:
 			raise AstrosphericFetchError(
-				f"Astrospheric response missing required keys: {missing}"
+				f"Astrospheric response missing required keys: {missing}",
+				code="no_data",
 			)
 		return parsed
 
-	raise AstrosphericFetchError(f"Unreachable retry path ({last_exc_type})")
+	raise AstrosphericFetchError(
+		f"Unreachable retry path ({last_exc_type})", code="internal"
+	)
 
 
 class AstrosphericFetchError(Exception):
-	"""Wraps any Astrospheric failure with a scrubbed message (no API key in str())."""
+	"""
+	Wraps any Astrospheric failure with a scrubbed message (no API key in str()).
+	`code` is a STABLE machine tag (no_key, network, http_403, http_4xx, http_5xx,
+	bad_json, no_data, internal) used as the dismissal key in the UI — it survives
+	across runs even as the human-readable message varies. `no_data` covers both a
+	non-dict body and a missing-keys body (both are "Astrospheric returned an
+	unusable 200" — one user-facing cause). The constructor default "error" is a
+	last-resort tag that no current raise path uses.
+	"""
+
+	def __init__(self, message: str, code: str = "error") -> None:
+		super().__init__(message)
+		self.code = code
 
 
 def fetch_open_meteo(lat: float, lon: float) -> dict[str, Any]:
@@ -1687,7 +1700,7 @@ def main() -> int:
 			sys.stdout = _null_log
 
 	cfg = load_config()
-	api_key = cfg["api"]["astrospheric_key"]
+	api_key = cfg.get("api", {}).get("astrospheric_key", "")
 	sites_cfg = cfg["sites"]
 	credit_budget = int(cfg.get("api", {}).get("astrospheric_daily_credit_budget", 100))
 
@@ -1709,10 +1722,9 @@ def main() -> int:
 		label = site_cfg.get("label", sid)
 		lat = float(site_cfg["lat"])
 		lon = float(site_cfg["lon"])
-		# Flags parsed by load_config (default true). .get() keeps main() working
-		# for hand-built configs in tests that predate the flags.
+		# Parsed by load_config (default true). .get() keeps main() working for
+		# hand-built configs in tests that predate the flag.
 		primary = site_cfg.get("primary", True)
-		use_astrospheric = site_cfg.get("use_astrospheric", True)
 		# Defensive: thresholds section may be missing or non-dict.
 		thresholds_section = cfg.get("thresholds")
 		if not isinstance(thresholds_section, dict):
@@ -1728,12 +1740,27 @@ def main() -> int:
 				lat, lon, OPEN_METEO_CONVERGENCE_MODELS
 			)
 
-			if use_astrospheric:
-				# North-America site: add the paid Astrospheric feed. Its Cloud
-				# Sense joins the Open-Meteo models in the scoring ensemble, and
-				# its seeing/transparency drive the astro-quality display.
-				astro = fetch_astrospheric(api_key, lat, lon)
-				credit_cost += ASTROSPHERIC_CREDIT_COST_PER_CALL
+			# Astrospheric eligibility is derived from lat/lon (no per-site flag).
+			# In-domain + key present → try the paid feed; on ANY failure, fall
+			# through to the free Open-Meteo + 7Timer path and record the reason
+			# so the UI can show a dismissable warning. Out-of-domain uses the
+			# free path silently (Astrospheric was never expected to work there);
+			# a missing key is recorded as a reason for IN-domain sites only.
+			astro = None
+			as_failure = None  # (human_reason, stable_code) when an in-domain try fails
+			if _in_astrospheric_domain(lat, lon):
+				if api_key:
+					try:
+						astro = fetch_astrospheric(api_key, lat, lon)
+						credit_cost += ASTROSPHERIC_CREDIT_COST_PER_CALL
+					except AstrosphericFetchError as e:
+						as_failure = (str(e), getattr(e, "code", "error"))
+				else:
+					as_failure = ("No Astrospheric API key configured", "no_key")
+
+			if astro is not None:
+				# Astrospheric OK: its Cloud Sense joins the Open-Meteo ensemble
+				# and its seeing/transparency drive the astro-quality display.
 				st_source = "astrospheric"
 				consensus, per_model = ensemble_cloud_by_hour(astro, conv_hourly)
 				hourly = merge_hourly(
@@ -1745,11 +1772,11 @@ def main() -> int:
 					"APICreditUsedToday": astro.get("APICreditUsedToday"),
 				}
 			else:
-				# International site: Astrospheric errors outside North America,
-				# so skip it (no credits). The cloud ensemble is Open-Meteo-only;
-				# seeing/transparency come from the free, global 7Timer service
-				# (best-effort — if 7Timer is down they show "—", site still
-				# scores on Open-Meteo cloud).
+				# Free path — used both for out-of-domain sites (silent) and for
+				# in-domain sites whose Astrospheric attempt failed (we attach a
+				# degraded entry the UI turns into a dismissable warning). Cloud
+				# ensemble is Open-Meteo-only; seeing/transparency come from the
+				# free, global 7Timer service (best-effort).
 				st_source = "7timer"
 				consensus, per_model = ensemble_cloud_by_hour(None, conv_hourly)
 				# fetch_7timer already returns the {utc_hour: (seeing, transparency)}
@@ -1763,14 +1790,22 @@ def main() -> int:
 					st_source=st_source,
 				)
 				meta = {"source": "7timer+openmeteo"}
-				# Flag a 7Timer outage so the widget shows a "7Timer unavailable"
-				# badge instead of a silent "—" for seeing/transparency.
-				# fetch_7timer returns {} on any failure (network, bad JSON,
-				# unusable shape); the site still scores on Open-Meteo cloud, only
-				# its astro-quality readout is missing. degraded is a list so more
-				# sources can be flagged later without a schema change.
+				# degraded is a list of {source, reason?, code?} the UI renders:
+				#   - {"source": "7timer"} → the existing "7Timer unavailable" badge
+				#   - {"source": "astrospheric", reason, code} → the red, dismissable
+				#     "Astrospheric failed (<reason>) — using Open-Meteo" notice
+				#     (in-domain sites only). `code` is the stable dismissal key.
+				degraded = []
 				if not seventimer:
-					meta["degraded"] = ["7timer"]
+					degraded.append({"source": "7timer"})
+				if as_failure is not None:
+					degraded.append({
+						"source": "astrospheric",
+						"reason": as_failure[0],
+						"code": as_failure[1],
+					})
+				if degraded:
+					meta["degraded"] = degraded
 
 			hourly_by_id[sid] = hourly
 			# The ensemble's per_model is the convergence-display source: for NA
@@ -1797,7 +1832,7 @@ def main() -> int:
 				"status": "ok",
 				"meta": meta,
 			})
-		except (AstrosphericFetchError, requests.RequestException, RuntimeError) as e:
+		except (requests.RequestException, RuntimeError) as e:
 			error_count += 1
 			sys.stderr.write(f"astrowidget: {sid}: API failure: {e}\n")
 			site_results.append({

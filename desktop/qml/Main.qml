@@ -9,6 +9,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
+import QtCore
 import "."
 
 ApplicationWindow {
@@ -22,6 +23,47 @@ ApplicationWindow {
 	color: Theme.backgroundColor
 
 	StateModel { id: stateModel }
+
+	// ── Dismissed degradation warnings (persisted across restarts) ───────
+	// QtCore.Settings is QML's QSettings wrapper: it reads at startup and
+	// writes on change to a per-platform store (~/.config/astrowidget/
+	// astrowidget.conf on Linux, the registry on Windows — see the org/app
+	// name set in run.py). Stored as a JSON string because Settings has no
+	// list type. Independent of the plasmoid's Plasmoid.configuration store
+	// by design (a dismissal in one UI doesn't carry to the other).
+	Settings {
+		id: appSettings
+		property string dismissedWarningsJson: "[]"
+	}
+
+	// Parsed dismissal keys ("<siteId>|<code>"); re-derived whenever the
+	// stored JSON changes, so a write flows straight back into every
+	// SiteColumn's dismissedKeys and hides the just-dismissed warning.
+	readonly property var dismissedWarnings: {
+		try {
+			const v = JSON.parse(appSettings.dismissedWarningsJson || "[]");
+			// Coerce a non-array (e.g. the literal "null" or "{}", which parse
+			// without throwing) to []; otherwise it reaches dismissedKeys and
+			// the .indexOf() in astroWarningVisible throws, silently hiding the
+			// warning this feature exists to show.
+			return Array.isArray(v) ? v : [];
+		} catch (e) {
+			// Malformed store → "nothing dismissed" rather than throwing. Logged
+			// so a corrupted store is diagnosable instead of silently swallowed.
+			console.warn("astrowidget: dismissedWarnings unreadable, treating as empty:", e);
+			return [];
+		}
+	}
+
+	// Append a dismissal key and persist it (idempotent). The write updates
+	// appSettings.dismissedWarningsJson, re-firing the binding above.
+	function dismissWarning(key) {
+		const list = dismissedWarnings.slice();
+		if (list.indexOf(key) < 0) {
+			list.push(key);
+			appSettings.dismissedWarningsJson = JSON.stringify(list);
+		}
+	}
 
 	// 0 = Tonight, 1 = +1 night, 2 = +2 nights.
 	property int selectedNight: 0
@@ -118,6 +160,8 @@ ApplicationWindow {
 							Layout.alignment: Qt.AlignTop
 							site: modelData
 							nightIndex: win.selectedNight
+							dismissedKeys: win.dismissedWarnings
+							onRequestDismiss: (key) => win.dismissWarning(key)
 						}
 					}
 
@@ -132,6 +176,8 @@ ApplicationWindow {
 							Layout.alignment: Qt.AlignTop
 							site: modelData
 							nightIndex: win.selectedNight
+							dismissedKeys: win.dismissedWarnings
+							onRequestDismiss: (key) => win.dismissWarning(key)
 						}
 					}
 

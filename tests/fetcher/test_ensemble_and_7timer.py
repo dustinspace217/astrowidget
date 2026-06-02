@@ -203,7 +203,7 @@ def _scoring_stub(sid):
 
 
 def test_main_international_site_skips_astrospheric(tmp_path):
-	"""An international site (use_astrospheric=false) must NOT call Astrospheric
+	"""A site outside Astrospheric's domain (Chile) must NOT call Astrospheric
 	(its API errors out-of-domain), spends no credits, tags meta.source as the
 	7Timer stack, and its 7Timer seeing reaches displayFactors with the INVERTED
 	label scale. The seeing assertion also guards the fetch_7timer double-build
@@ -213,7 +213,7 @@ def test_main_international_site_skips_astrospheric(tmp_path):
 		"open_meteo": {"models": []},
 		"sites": [{
 			"id": "chile", "label": "Deep Sky Chile", "lat": -33.0, "lon": -70.0,
-			"timezone": "America/Santiago", "primary": True, "use_astrospheric": False,
+			"timezone": "America/Santiago", "primary": True,
 		}],
 		"thresholds": {},
 		"notifications": {"upward_transitions": False,
@@ -303,9 +303,9 @@ def test_main_mixed_na_and_international_in_one_run(tmp_path):
 		"open_meteo": {"models": []},
 		"sites": [
 			{"id": "na", "label": "NA Site", "lat": 45.0, "lon": -120.0,
-			 "timezone": "UTC", "use_astrospheric": True},
+			 "timezone": "UTC"},
 			{"id": "intl", "label": "Intl Site", "lat": -33.0, "lon": -70.0,
-			 "timezone": "UTC", "use_astrospheric": False},
+			 "timezone": "UTC"},
 		],
 		"thresholds": {},
 		"notifications": {"upward_transitions": False,
@@ -362,7 +362,7 @@ def intl_cfg():
 		"api": {"astrospheric_key": "fake", "astrospheric_daily_credit_budget": 100},
 		"open_meteo": {"models": []},
 		"sites": [{"id": "chile", "label": "Deep Sky Chile", "lat": -33.0, "lon": -70.0,
-				   "timezone": "America/Santiago", "primary": True, "use_astrospheric": False}],
+				   "timezone": "America/Santiago", "primary": True}],
 		"thresholds": {},
 		"notifications": {"upward_transitions": False,
 			"downward_transitions_day_of": False, "astro_dark_start_reminder": False},
@@ -387,7 +387,7 @@ def test_main_international_7timer_down_sets_degraded(intl_cfg, tmp_path):
 		assert fx.main() == 0
 	site = json.loads((tmp_path / "state.json").read_text())["sites"][0]
 	assert site["status"] == "ok"
-	assert site["meta"]["degraded"] == ["7timer"]
+	assert site["meta"]["degraded"] == [{"source": "7timer"}]
 
 
 def test_main_international_7timer_up_no_degraded(intl_cfg, tmp_path):

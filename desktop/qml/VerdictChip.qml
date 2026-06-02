@@ -68,8 +68,18 @@ MouseArea {
 		// 7Timer-down indicator (secondary sites are the 7Timer-sourced ones).
 		Text {
 			visible: {
+				// meta.degraded is a list of {source, ...} objects (was a bare
+				// string list). Fire the ⚠ when a 7Timer entry is present. The
+				// `d &&` guard skips a null/garbled element so a malformed
+				// state.json can't throw and silently drop the indicator. The
+				// Astrospheric-failure warning lives in the expanded column.
 				const m = chip.site.meta;
-				return !!(m && m.degraded && m.degraded.indexOf("7timer") >= 0);
+				if (!m || !m.degraded) return false;
+				for (let i = 0; i < m.degraded.length; i++) {
+					const d = m.degraded[i];
+					if (d && d.source === "7timer") return true;
+				}
+				return false;
 			}
 			text: "⚠"
 			color: Theme.neutralTextColor

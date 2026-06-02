@@ -104,15 +104,16 @@ def test_load_config_skips_perm_check_on_windows(tmp_path, monkeypatch):
 	assert cfg["api"]["astrospheric_key"] == "fake-key-for-tests"
 
 
-def test_load_config_missing_api_key_rejected(tmp_path, monkeypatch):
-	"""Empty astrospheric_key → exit 2."""
+def test_load_config_missing_api_key_now_accepted(tmp_path, monkeypatch):
+	"""The Astrospheric key is OPTIONAL now: an empty (or absent) key loads fine.
+	In-domain sites surface a dismissable 'no key' notice and use the free
+	sources; the key was previously a hard requirement even for free-only configs."""
 	cfg = VALID_CONFIG.replace('"fake-key-for-tests"', '""')
 	cfg_path = _write_config(tmp_path, cfg, mode=0o600)
 	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
 	with patch.object(fx, "_notify"):
-		with pytest.raises(SystemExit) as ei:
-			fx.load_config()
-	assert ei.value.code == 2
+		loaded = fx.load_config()  # must NOT raise
+	assert loaded["sites"][0]["id"] == "site_a"
 
 
 def test_load_config_no_sites_rejected(tmp_path, monkeypatch):
@@ -155,31 +156,14 @@ def test_load_config_malformed_toml_rejected(tmp_path, monkeypatch):
 # ── Per-site source/visibility flags (7-site expansion) ──────────────────────
 
 
-def test_load_config_flag_defaults_to_primary_astrospheric(tmp_path, monkeypatch):
-	"""A site with neither flag defaults both to True — the pre-expansion NA-only
-	behavior — so older configs keep working unchanged."""
+def test_load_config_primary_defaults_true(tmp_path, monkeypatch):
+	"""A site with no `primary` flag defaults to True (a full always-on column).
+	Astrospheric eligibility is now derived from lat/lon, not a flag."""
 	cfg_path = _write_config(tmp_path, VALID_CONFIG, mode=0o600)
 	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
 	with patch.object(fx, "_notify"):
 		cfg = fx.load_config()
-	site = cfg["sites"][0]
-	assert site["primary"] is True
-	assert site["use_astrospheric"] is True
-
-
-def test_load_config_rejects_non_bool_use_astrospheric(tmp_path, monkeypatch):
-	"""use_astrospheric = "false" (a STRING) must be rejected, not silently
-	accepted: a truthy string would enable Astrospheric on an out-of-domain
-	international site, burning credits and erroring every run. The most
-	expensive misconfiguration the expansion introduced."""
-	cfg = VALID_CONFIG + '\nuse_astrospheric = "false"\n'
-	cfg_path = _write_config(tmp_path, cfg, mode=0o600)
-	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
-	with patch.object(fx, "_notify") as nf:
-		with pytest.raises(SystemExit) as ei:
-			fx.load_config()
-	assert ei.value.code == 2
-	assert "use_astrospheric" in nf.call_args.args[0]
+	assert cfg["sites"][0]["primary"] is True
 
 
 def test_load_config_rejects_non_bool_primary(tmp_path, monkeypatch):

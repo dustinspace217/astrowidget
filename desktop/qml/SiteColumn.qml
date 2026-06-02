@@ -32,6 +32,40 @@ ColumnLayout {
 		: null
 	readonly property var df: night ? (night.displayFactors || null) : null
 
+	// ── Degradation-warning plumbing ─────────────────────────────────────
+	// Dismissed "<siteId>|<code>" keys, passed down from Main.qml (which owns
+	// the Settings store). Defaults to empty so the column degrades safely to
+	// "show all warnings" if a parent ever forgets to bind it.
+	property var dismissedKeys: []
+	// Emitted when the user clicks "Don't show this again". Main.qml appends the
+	// key to Settings; the updated dismissedKeys flows back and hides the block.
+	signal requestDismiss(string key)
+
+	// The Astrospheric-failure entry the fetcher recorded in meta.degraded, or
+	// null. Shape: {source:"astrospheric", reason:<human>, code:<stable>}. Only
+	// IN-coverage sites whose Astrospheric fetch failed get one; out-of-coverage
+	// sites use the free 7Timer+Open-Meteo path silently and never carry it.
+	readonly property var astroFailure: {
+		const m = site.meta;
+		if (!m || !m.degraded) return null;
+		for (let i = 0; i < m.degraded.length; i++) {
+			const d = m.degraded[i];
+			// `d &&` skips a null/garbled element so a malformed or partially
+			// written state.json can't throw here (a throw would evaluate the
+			// binding to undefined and silently drop the warning).
+			if (d && d.source === "astrospheric") return d;
+		}
+		return null;
+	}
+	// Stable dismissal key <siteId>|<code>. Keyed on the CODE, not the human
+	// reason, so "Don't show again" hides only this failure mode — a different
+	// Astrospheric failure later (an outage after a 403, say) still surfaces.
+	readonly property string astroFailureKey:
+		astroFailure ? (site.id + "|" + (astroFailure.code || "error")) : ""
+	// Show the red warning unless the user dismissed THIS site + THIS code.
+	readonly property bool astroWarningVisible:
+		astroFailure !== null && dismissedKeys.indexOf(astroFailureKey) < 0
+
 	// ── Header: site label + verdict pill ────────────────────────────────
 	RowLayout {
 		Layout.fillWidth: true
@@ -107,14 +141,101 @@ ColumnLayout {
 		elide: Text.ElideRight
 	}
 
+	// ── Astrospheric-failure warning (red, dismissable) ──────────────────
+	// Shown ONLY for sites inside Astrospheric's coverage whose Astrospheric
+	// fetch failed (no key / rejected key / outage / bad data). The site still
+	// has a full verdict — it transparently fell back to the free 7Timer +
+	// Open-Meteo path — so this explains the downgrade instead of letting the
+	// paid seeing/transparency silently vanish. Out-of-coverage sites use the
+	// free path WITHOUT this warning. "Don't show this again" suppresses this
+	// site + THIS failure code only (see astroFailureKey).
+	Rectangle {
+		Layout.fillWidth: true
+		visible: col.astroWarningVisible
+		Layout.preferredHeight: asWarnCol.implicitHeight + Theme.smallSpacing * 2
+		radius: Theme.smallSpacing
+		// Tinted (not solid) negative color: reads as an error at a glance
+		// while keeping the text legible over the fill.
+		color: Qt.alpha(Theme.negativeTextColor, 0.15)
+
+		ColumnLayout {
+			id: asWarnCol
+			anchors.fill: parent
+			anchors.margins: Theme.smallSpacing
+			spacing: Theme.smallSpacing
+
+			// Headline — matches the wording the user specified.
+			Text {
+				Layout.fillWidth: true
+				wrapMode: Text.WordWrap
+				color: Theme.negativeTextColor
+				font.bold: true
+				font.pixelSize: Theme.smallFontSize
+				text: qsTr("⚠ Astrospheric data failed — using Open-Meteo data.")
+			}
+			// Detail — the fetcher's scrubbed reason string (already API-key-safe).
+			// On its own line so the headline stays clean; e.g. "Astrospheric
+			// returned HTTP 403 (details suppressed to protect API key)" or
+			// "No Astrospheric API key configured".
+			Text {
+				Layout.fillWidth: true
+				visible: text.length > 0
+				wrapMode: Text.WordWrap
+				color: Theme.negativeTextColor
+				opacity: 0.85
+				font.pixelSize: Theme.smallFontSize
+				text: col.astroFailure ? col.astroFailure.reason : ""
+			}
+			// Primitive "Don't show this again" button — Rectangle + Text +
+			// MouseArea, matching this file's Controls-free style (the verdict
+			// pill above is built the same way). Avoids importing QtQuick.Controls
+			// here just for one button.
+			Rectangle {
+				Layout.alignment: Qt.AlignRight
+				Layout.preferredHeight: dismissText.implicitHeight + Theme.smallSpacing * 2
+				Layout.preferredWidth: dismissText.implicitWidth + Theme.largeSpacing * 2
+				radius: Theme.smallSpacing
+				// Stronger fill than the panel so it reads as actionable; darkens
+				// while pressed for click feedback.
+				color: dismissMouse.pressed
+					? Qt.alpha(Theme.negativeTextColor, 0.45)
+					: Qt.alpha(Theme.negativeTextColor, 0.28)
+
+				Text {
+					id: dismissText
+					anchors.centerIn: parent
+					text: qsTr("Don't show this again")
+					color: Theme.textColor
+					font.pixelSize: Theme.smallFontSize
+				}
+				MouseArea {
+					id: dismissMouse
+					anchors.fill: parent
+					cursorShape: Qt.PointingHandCursor
+					onClicked: col.requestDismiss(col.astroFailureKey)
+				}
+			}
+		}
+	}
+
 	Item { Layout.preferredHeight: Theme.smallSpacing }
 
 	// ── 7Timer-unavailable badge ─────────────────────────────────────────
 	Rectangle {
 		Layout.fillWidth: true
 		visible: {
+			// meta.degraded is now a list of {source, reason?, code?} objects
+			// (was a bare string list). The 7Timer badge fires when any entry's
+			// source is "7timer"; the Astrospheric warning above keys off the
+			// "astrospheric" source the same way, so a site whose paid feed AND
+			// free seeing source both failed shows both notices.
 			const m = col.site.meta;
-			return !!(m && m.degraded && m.degraded.indexOf("7timer") >= 0);
+			if (!m || !m.degraded) return false;
+			for (let i = 0; i < m.degraded.length; i++) {
+				const d = m.degraded[i];
+				if (d && d.source === "7timer") return true;
+			}
+			return false;
 		}
 		Layout.preferredHeight: degradedLabel.implicitHeight + Theme.smallSpacing
 		radius: Theme.smallSpacing

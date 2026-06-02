@@ -35,6 +35,12 @@ except ImportError:
 # shows itself), and runs the event loop. Returns the process exit code.
 def main() -> int:
 	app = QGuiApplication(sys.argv)
+	# Identify the app so the QML Settings element (QtCore) persists the
+	# "Don't show this again" dismissals to a stable per-platform location
+	# (~/.config/astrowidget/astrowidget.conf on Linux, the registry on
+	# Windows). QSettings warns and falls back to a generic path if unset.
+	app.setOrganizationName("astrowidget")
+	app.setApplicationName("astrowidget")
 	engine = QQmlApplicationEngine()
 	qml_main = pathlib.Path(__file__).resolve().parent / "qml" / "Main.qml"
 	engine.load(QUrl.fromLocalFile(str(qml_main)))

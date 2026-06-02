@@ -5,47 +5,43 @@
 # The fetcher refuses to read configs that are not 0600.
 
 [api]
-# Get your Astrospheric Pro API key from https://www.astrospheric.com/account
-# Pro tier is required for API access.
+# Astrospheric is OPTIONAL — it adds a North-America-only "Cloud Sense" feed plus
+# its own seeing/transparency for sites inside its coverage. Without a key (or for
+# sites outside North America) the widget uses the free 7Timer + Open-Meteo
+# sources automatically. Get a Pro key from https://www.astrospheric.com/account
+# (Pro tier is required for API access); leave it blank to run entirely free.
 astrospheric_key = ""
 
 # Pro accounts get 100 credits/day. GetForecastData_V1 costs 5 credits per call.
-# Set to 0 to disable budget tracking.
+# Set to 0 to disable budget tracking. Only North-America sites use credits.
 astrospheric_daily_credit_budget = 100
 
 # Open-Meteo is free and requires no key.
 [open_meteo]
 # Open-Meteo cloud-cover models for the multi-model ensemble. For North-America
-# sites these three are averaged with Astrospheric's Cloud Sense (RDPS) into the
-# consensus cloud value that drives scoring, and their spread is shown as the
-# convergence indicator. For international sites (use_astrospheric = false) these
-# three ARE the cloud ensemble on their own. GFS is taken from Open-Meteo only
-# (Astrospheric's GFS/NAM are undocumented), so the mean never double-counts a
-# model. These are distinct physical models — NOT Open-Meteo's best_match blend,
-# which is itself a mix of them and would corrupt the convergence spread.
+# sites with a working Astrospheric feed, these three are averaged with
+# Astrospheric's Cloud Sense (RDPS) into the consensus cloud; everywhere else
+# (and whenever Astrospheric is unavailable) these three ARE the ensemble on
+# their own, and their spread is the convergence indicator. GFS is taken from
+# Open-Meteo only (Astrospheric's GFS/NAM are undocumented), so the mean never
+# double-counts a model. These are distinct physical models — NOT Open-Meteo's
+# best_match blend, which is itself a mix of them and would corrupt the spread.
 models = ["gfs_seamless", "ecmwf_ifs04", "icon_seamless"]
 
 # Add [[sites]] blocks for the sites you want to monitor.
 # Lat/lon in decimal degrees, negative for south/west.
 # `id` must be lowercase a-z 0-9; it is used as the state.json key.
 #
-# Two optional per-site flags control data source and layout:
+# Astrospheric eligibility is AUTOMATIC, derived from lat/lon: sites inside its
+# North-America coverage use the Astrospheric feed (when a key is set above), and
+# the rest use 7Timer + Open-Meteo. If an in-coverage site's Astrospheric data
+# fails (no key, rejected key, outage), the site falls back to the free sources
+# and shows a dismissable notice — there is nothing to configure for that.
 #
-#   primary           true  -> full always-on column in the popup (default).
-#                     false -> collapsed verdict chip; click to expand. Use for
-#                              sites you only check occasionally.
-#   use_astrospheric  true  -> North-America site (default): fetches the
-#                              Astrospheric Pro feed (seeing/transparency) and
-#                              scores cloud on the Astrospheric + Open-Meteo
-#                              ensemble.
-#                     false -> International site: SKIPS Astrospheric (its API
-#                              errors outside North America) and uses the free
-#                              7Timer service for seeing/transparency plus
-#                              Open-Meteo for cloud/precip/wind. Spends no credits.
-#
-# Both default to true, so a minimal North-America site needs neither flag.
-# Only use_astrospheric sites consume Astrospheric credits (5 per site per run,
-# 4 runs/day); international sites are free and unlimited.
+# The one optional per-site flag is layout:
+#   primary  true  -> full always-on column in the popup (default).
+#            false -> collapsed verdict chip; click to expand. Use for sites you
+#                     only check occasionally.
 
 [[sites]]
 id = "site_a"
@@ -54,9 +50,8 @@ lat = 0.0
 lon = 0.0
 timezone = "UTC"
 # primary = true            # full column (this is the default)
-# use_astrospheric = true   # North-America site, uses Astrospheric (default)
 
-# A second North-America site (also uses Astrospheric):
+# A second site (Astrospheric is used automatically if it's in North America):
 # [[sites]]
 # id = "site_b"
 # label = "Remote Observatory"
@@ -64,16 +59,15 @@ timezone = "UTC"
 # lon = 0.0
 # timezone = "America/Denver"
 
-# An international PRIMARY site — no Astrospheric, uses 7Timer + Open-Meteo:
+# A site outside North America — automatically uses 7Timer + Open-Meteo:
 # [[sites]]
 # id = "site_c"
 # label = "Southern Hemisphere Site"
 # lat = 0.0
 # lon = 0.0
 # timezone = "UTC"
-# use_astrospheric = false
 
-# An international SECONDARY site — collapsed chip, click to expand:
+# A SECONDARY site — collapsed chip, click to expand:
 # [[sites]]
 # id = "site_d"
 # label = "Rarely-Used Site"
@@ -81,7 +75,6 @@ timezone = "UTC"
 # lon = 0.0
 # timezone = "UTC"
 # primary = false
-# use_astrospheric = false
 
 # Optional per-site veto thresholds. Defaults come from the scoring engine's
 # calibration constants -- override only when your site/scope needs it.

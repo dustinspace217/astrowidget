@@ -20,5 +20,13 @@
 			<min>0</min>
 			<max>2</max>
 		</entry>
+		<!-- Dismissed degradation warnings, as a JSON array of "<siteId>|<code>"
+		     strings (e.g. ["udro|http_403"]). Written when the user clicks
+		     "Don't show this again" on a site's Astrospheric-failure notice and
+		     read back to keep that exact site+reason hidden. Stored as a string
+		     because KConfig has no list type that round-trips cleanly to QML. -->
+		<entry name="dismissedWarnings" type="String">
+			<default>[]</default>
+		</entry>
 	</group>
 </kcfg>

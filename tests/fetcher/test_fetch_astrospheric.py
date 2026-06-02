@@ -103,3 +103,38 @@ def test_fetch_astrospheric_error_message_excludes_api_key():
 	assert "secret-key-do-not-leak" not in msg
 	# Should at least name the exception type for diagnostics.
 	assert "ConnectionError" in msg
+
+
+def test_fetch_astrospheric_tags_each_failure_with_stable_code():
+	"""Every failure mode tags AstrosphericFetchError with its STABLE .code. The
+	code is the persisted dismissal key (<site_id>|<code>), so a regression in the
+	status→code mapping (a 403 losing its dedicated code, or `// 100` becoming
+	`// 10`) would silently break "Don't show this again" — a saved dismissal would
+	stop matching, or worse, mask a different error. This is the one place that
+	mapping is exercised end to end; the older tests above only assert that it
+	raises, not which code it carries."""
+
+	def _code_for(post_mock) -> str:
+		with patch.object(fx.requests, "post", post_mock):
+			with pytest.raises(fx.AstrosphericFetchError) as ei:
+				fx.fetch_astrospheric("test-key", 47.0, -122.0)
+		return ei.value.code
+
+	# 403 (key rejected) gets its own code so it can be dismissed specifically.
+	assert _code_for(MagicMock(side_effect=[_mock_response(403)])) == "http_403"
+	# Any other 4xx buckets to http_4xx.
+	assert _code_for(MagicMock(side_effect=[_mock_response(404)])) == "http_4xx"
+	# 5xx on both attempts (one retry happens) → http_5xx.
+	assert _code_for(MagicMock(return_value=_mock_response(500))) == "http_5xx"
+	# Connection error on both attempts → network.
+	assert _code_for(MagicMock(side_effect=requests.ConnectionError("DNS"))) == "network"
+	# 200 whose body isn't valid JSON → bad_json.
+	_bad_json = _mock_response(200)
+	_bad_json.json.side_effect = ValueError("not json")
+	assert _code_for(MagicMock(return_value=_bad_json)) == "bad_json"
+	# 200 with a non-dict body → no_data.
+	_non_dict = _mock_response(200)
+	_non_dict.json.return_value = "API down"
+	assert _code_for(MagicMock(return_value=_non_dict)) == "no_data"
+	# 200 with a dict missing required keys → no_data.
+	assert _code_for(MagicMock(return_value=_mock_response(200, {"error": "x"}))) == "no_data"

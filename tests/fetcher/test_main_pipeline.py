@@ -141,17 +141,19 @@ def test_main_all_sites_succeed_returns_0(patched_paths):
 
 
 def test_main_partial_failure_continues_with_other_sites(patched_paths):
-	"""One Astrospheric call fails → site has error status, other succeeds, exit 0."""
+	"""One site's Open-Meteo call fails → that site errors, the other succeeds,
+	exit 0. (Open-Meteo is the base source with no fallback, so its failure — not
+	Astrospheric's — is what genuinely errors a site now.)"""
 	call_count = [0]
 	def maybe_fail(*a, **kw):
 		call_count[0] += 1
 		if call_count[0] == 1:
-			raise fx.AstrosphericFetchError("simulated network failure")
-		return _astrospheric_stub()
+			raise fx.requests.RequestException("simulated Open-Meteo failure")
+		return _open_meteo_stub()
 
 	with patch.object(fx, "load_config", return_value=VALID_CFG), \
-		 patch.object(fx, "fetch_astrospheric", side_effect=maybe_fail), \
-		 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
+		 patch.object(fx, "fetch_astrospheric", return_value=_astrospheric_stub()), \
+		 patch.object(fx, "fetch_open_meteo", side_effect=maybe_fail), \
 		 patch.object(fx, "invoke_scoring_binary",
 					  return_value=_scoring_output("site_b")), \
 		 patch.object(fx, "_notify"):
@@ -165,11 +167,12 @@ def test_main_partial_failure_continues_with_other_sites(patched_paths):
 
 
 def test_main_all_sites_fail_returns_3(patched_paths):
-	"""Every site fails its API call → exit 3 (per documented contract)."""
+	"""Every site's Open-Meteo call fails → exit 3 (per documented contract).
+	Open-Meteo is the base source; its failure errors the site (Astrospheric
+	failures degrade instead — see the degrade tests below)."""
 	with patch.object(fx, "load_config", return_value=VALID_CFG), \
-		 patch.object(fx, "fetch_astrospheric",
-					  side_effect=fx.AstrosphericFetchError("down")), \
-		 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
+		 patch.object(fx, "fetch_open_meteo",
+					  side_effect=fx.requests.RequestException("down")), \
 		 patch.object(fx, "invoke_scoring_binary",
 					  return_value=_scoring_output()), \
 		 patch.object(fx, "_notify"):
@@ -229,3 +232,104 @@ def test_main_budget_warning_fires_at_80pct(patched_paths):
 	# A budget-warning notify-send must have been emitted.
 	titles = [c.args[0] for c in nf.call_args_list]
 	assert any("quota" in t.lower() or "budget" in t.lower() for t in titles)
+
+
+# ── Astrospheric graceful fallback (lat/lon-derived, dismissable warning) ─────
+
+
+def test_main_in_domain_astrospheric_failure_degrades_not_errors(patched_paths):
+	"""An in-domain site whose Astrospheric call fails still SUCCEEDS via the free
+	Open-Meteo + 7Timer path, with a degraded[astrospheric] entry (reason + stable
+	code) for the UI warning — it is NOT marked error, and no credit is charged."""
+	with patch.object(fx, "load_config", return_value=VALID_CFG), \
+		 patch.object(fx, "fetch_astrospheric",
+					  side_effect=fx.AstrosphericFetchError("HTTP 403", code="http_403")), \
+		 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
+		 patch.object(fx, "fetch_7timer", return_value={}), \
+		 patch.object(fx, "invoke_scoring_binary",
+					  return_value=_scoring_output("site_a", "site_b")), \
+		 patch.object(fx, "_notify"):
+		rc = fx.main()
+	assert rc == 0
+	import json
+	state = json.loads((patched_paths / "cache" / "state.json").read_text())
+	by_id = {s["id"]: s for s in state["sites"]}
+	assert by_id["site_a"]["status"] == "ok"
+	as_entry = next(d for d in by_id["site_a"]["meta"]["degraded"]
+					if d["source"] == "astrospheric")
+	assert as_entry["code"] == "http_403"
+	assert "403" in as_entry["reason"]
+	assert state["astrosphericCreditCost"] == 0  # failed calls cost nothing
+
+
+def test_main_out_of_domain_site_uses_free_path_silently(patched_paths):
+	"""A site outside Astrospheric's North-America box uses Open-Meteo + 7Timer
+	with NO Astrospheric attempt and NO degraded[astrospheric] entry."""
+	cfg = dict(VALID_CFG)
+	cfg["sites"] = [
+		{"id": "intl", "label": "Intl", "lat": -33.0, "lon": 18.0, "timezone": "UTC"},
+	]
+	with patch.object(fx, "load_config", return_value=cfg), \
+		 patch.object(fx, "fetch_astrospheric",
+					  side_effect=AssertionError("Astrospheric must not be called out of domain")), \
+		 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
+		 patch.object(fx, "fetch_7timer", return_value={}), \
+		 patch.object(fx, "invoke_scoring_binary", return_value=_scoring_output("intl")), \
+		 patch.object(fx, "_notify"):
+		rc = fx.main()
+	assert rc == 0
+	import json
+	state = json.loads((patched_paths / "cache" / "state.json").read_text())
+	degraded = state["sites"][0].get("meta", {}).get("degraded", [])
+	assert not any(d["source"] == "astrospheric" for d in degraded)
+
+
+def test_main_in_domain_no_key_degrades_no_key(patched_paths):
+	"""In-domain site with no API key → free path + degraded[astrospheric] code
+	'no_key' (the missing key is surfaced as a dismissable warning, not a crash)."""
+	cfg = dict(VALID_CFG)
+	cfg["api"] = {}  # no astrospheric_key
+	with patch.object(fx, "load_config", return_value=cfg), \
+		 patch.object(fx, "fetch_astrospheric",
+					  side_effect=AssertionError("Astrospheric must not be called without a key")), \
+		 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
+		 patch.object(fx, "fetch_7timer", return_value={}), \
+		 patch.object(fx, "invoke_scoring_binary",
+					  return_value=_scoring_output("site_a", "site_b")), \
+		 patch.object(fx, "_notify"):
+		rc = fx.main()
+	assert rc == 0
+	import json
+	state = json.loads((patched_paths / "cache" / "state.json").read_text())
+	as_entry = next(d for d in state["sites"][0]["meta"]["degraded"]
+					if d["source"] == "astrospheric")
+	assert as_entry["code"] == "no_key"
+
+
+def test_main_in_domain_both_astrospheric_and_7timer_degrade_coexist(patched_paths):
+	"""An in-domain site whose Astrospheric AND 7Timer both fail records BOTH
+	degraded entries. The schema generalized from a bare ["7timer"] list to a list
+	of {source,...} objects precisely so the red Astrospheric warning and the
+	neutral 7Timer badge can coexist; a regression that overwrote rather than
+	appended would show only one (and which one would depend on order). Also pins a
+	NON-403 code (http_5xx) flowing through end-to-end, which no other pipeline
+	test does."""
+	as_err = fx.AstrosphericFetchError("HTTP 500", code="http_5xx")
+	with patch.object(fx, "load_config", return_value=VALID_CFG), \
+			patch.object(fx, "fetch_astrospheric", side_effect=as_err), \
+			patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
+			patch.object(fx, "fetch_7timer", return_value={}), \
+			patch.object(fx, "invoke_scoring_binary",
+						 return_value=_scoring_output("site_a", "site_b")), \
+			patch.object(fx, "_notify"):
+		rc = fx.main()
+	assert rc == 0
+	import json
+	state = json.loads((patched_paths / "cache" / "state.json").read_text())
+	degraded = {s["id"]: s for s in state["sites"]}["site_a"]["meta"]["degraded"]
+	# Both sources present, exactly once each.
+	assert {d["source"] for d in degraded} == {"7timer", "astrospheric"}
+	assert len(degraded) == 2
+	# The astrospheric entry carries its code even when 7timer also degraded.
+	as_entry = next(d for d in degraded if d["source"] == "astrospheric")
+	assert as_entry["code"] == "http_5xx"

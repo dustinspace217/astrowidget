@@ -65,6 +65,43 @@ Item {
 		return c;
 	}
 
+	// ── Dismissed degradation warnings ───────────────────────────────────
+	// Keys are "<siteId>|<code>" strings (e.g. "udro|http_403"): a specific
+	// site paired with a specific failure code. Persisted as a JSON string in
+	// Plasmoid.configuration.dismissedWarnings (KConfig has no list-of-string
+	// type that round-trips cleanly to QML, so we serialize). SiteColumn holds
+	// no config access itself — it receives this parsed array and emits a
+	// requestDismiss(key) signal back up, keeping all KConfig I/O here where the
+	// Plasmoid attached property is reliably in scope.
+	readonly property var dismissedWarnings: {
+		try {
+			const v = JSON.parse(Plasmoid.configuration.dismissedWarnings || "[]");
+			// Coerce a non-array (e.g. the literal "null" or "{}" — both parse
+			// without throwing) to []. Without this, a non-array reaches
+			// dismissedKeys and the .indexOf() in astroWarningVisible throws,
+			// silently suppressing the warning this feature exists to show.
+			return Array.isArray(v) ? v : [];
+		} catch (e) {
+			// Malformed value → "nothing dismissed" rather than throwing (an
+			// exception in this binding would blank the popup). Logged so a
+			// corrupted store is diagnosable instead of silently swallowed.
+			console.warn("astrowidget: dismissedWarnings unreadable, treating as empty:", e);
+			return [];
+		}
+	}
+
+	// Append a dismissal key and persist it. Writing Plasmoid.configuration
+	// re-fires the binding above, which flows the new array into every
+	// SiteColumn (via dismissedKeys) and hides the just-dismissed warning with
+	// no manual refresh. Idempotent — re-dismissing a known key is a no-op.
+	function dismissWarning(key) {
+		const list = dismissedWarnings.slice();   // copy; never mutate the bound value
+		if (list.indexOf(key) < 0) {
+			list.push(key);
+			Plasmoid.configuration.dismissedWarnings = JSON.stringify(list);
+		}
+	}
+
 	// Night-vision: when enabled in config, override the Kirigami theme to a
 	// red-on-near-black palette so the popup doesn't wreck dark adaptation if
 	// it's open near a scope. Setting Kirigami.Theme on this root propagates
@@ -176,6 +213,11 @@ Item {
 					Layout.preferredWidth: full.columnWidth
 					site: modelData
 					nightIndex: full.selectedNight
+					// Parsed dismissed-warning keys flow down; the dismiss click
+					// flows back up to persist. The arrow form names the signal
+					// parameter (the Qt6-recommended, non-deprecated handler).
+					dismissedKeys: full.dismissedWarnings
+					onRequestDismiss: (key) => full.dismissWarning(key)
 				}
 			}
 
@@ -194,6 +236,8 @@ Item {
 					Layout.preferredWidth: full.columnWidth
 					site: modelData
 					nightIndex: full.selectedNight
+					dismissedKeys: full.dismissedWarnings
+					onRequestDismiss: (key) => full.dismissWarning(key)
 				}
 			}
 

@@ -182,3 +182,69 @@ int skyBrightnessScore(double sb) {
 	// Linear interpolation: 17.0 → 0, 21.5 → 100.
 	return ((sb - 17.0) / (21.5 - 17.0) * 100).round().clamp(0, 100);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Location-level sky brightness (Phase 1 redesign — spec §5a)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Geometry-aware moon "burden" for LOCATION scoring, 0..1.
+///
+/// `burden = illuminationFraction × max(0, sin(moonAltitude))`. A moon below the
+/// horizon contributes nothing; a low moon contributes less than one near the
+/// zenith. This is the Phase-1 fix for the old illumination-only moon term — the
+/// single biggest physics error in the prior model (spec §2a/§5a): it ignored
+/// that an unrisen 95%-moon is a dark sky and a low moon scatters far less light.
+/// Source: Krisciunas & Schaefer 1991 (moonlit sky brightening scales with the
+/// moon's altitude, not just its phase). Per-target separation is left to
+/// [moonBrightnessContribution] (scoreTarget); location scoring has no single
+/// target, so it uses altitude geometry only.
+///
+/// Receives: [illuminationPercent] 0-100, [moonAltitudeDeg] degrees above horizon.
+/// Returns: dimensionless burden in [0, 1].
+double moonBurden({
+	required double illuminationPercent,
+	required double moonAltitudeDeg,
+}) {
+	final sinAlt = sin(moonAltitudeDeg * (pi / 180.0));
+	if (sinAlt <= 0) return 0.0; // moon at/below the horizon → no contribution
+	return (illuminationPercent / 100.0) * sinAlt;
+}
+
+/// Fallback zenith sky brightness (mag/arcsec²) when a site has neither a `bortle`
+/// override nor a lat/lon-derived value — ≈ a suburban-unknown site (between Bortle
+/// 4 and 5). CRITICAL (Phase-1 verification): the geometry-aware moon penalty rides
+/// the sky-brightness factor, so this baseline must NEVER be null — otherwise the
+/// whole moon fix goes dormant for any site without a Bortle (e.g. Bainbridge, the
+/// triggering-incident site). The deferred lat/lon lookup only REFINES this; the
+/// moon penalty works regardless. Directional physics default — re-tune, or replace
+/// with the lookup, later (spec §10).
+const double _defaultZenithSb = 20.5;
+
+/// Location-level sky-brightness score (0-100, higher = darker = better) from the
+/// site's Bortle baseline plus the geometry-aware moon burden. Reuses
+/// [zenithSkyBrightness] + [skyBrightnessScore]; when [bortle] is null it falls back
+/// to [_defaultZenithSb] so the moon penalty ALWAYS applies (the Phase-1 fix).
+///
+/// `moonMaxDeltaMag` (3.0) is the worst-case brightening — full moon at the zenith —
+/// consistent with the existing [effectiveSkyBrightness] clamp(0, 4); a physics
+/// default, NOT regression-fit (spec §5/§10). Unlike the per-target
+/// [effectiveSkyBrightness] this NEVER returns null, because the moon signal must
+/// survive a missing Bortle.
+///
+/// Receives: [bortle] (1-9, nullable), [moonIlluminationPercent] 0-100,
+/// [moonAltitudeDeg] degrees.
+/// Returns: score 0-100.
+int locationSkyBrightnessScore({
+	int? bortle,
+	required double moonIlluminationPercent,
+	required double moonAltitudeDeg,
+}) {
+	const moonMaxDeltaMag = 3.0;
+	final baseSb = zenithSkyBrightness(bortle) ?? _defaultZenithSb;
+	final burden = moonBurden(
+		illuminationPercent: moonIlluminationPercent,
+		moonAltitudeDeg: moonAltitudeDeg,
+	);
+	final effectiveSb = baseSb - burden * moonMaxDeltaMag; // brighter sky = lower mag
+	return skyBrightnessScore(effectiveSb);
+}

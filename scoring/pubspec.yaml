@@ -17,3 +17,5 @@ environment:
 dependencies:
   geoengine: ^1.0.6   # astronomy: sun/moon positions, rise/set/transit
   logger: ^2.7.0      # used by the vendored app_logger
+dev_dependencies:
+  test: ^1.25.0

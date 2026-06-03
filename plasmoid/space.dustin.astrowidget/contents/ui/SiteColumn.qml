@@ -13,7 +13,7 @@
 //   - night.displayFactors  → human weather readout (incl. paid Astrospheric
 //                             seeing/transparency). schemaVersion 2+.
 //   - night.broadband.factors → the engine's 0-100 sub-scores (cloud/
-//                             stability/darkness/moon) behind the verdict.
+//                             stability/skyBrightness/transparency) behind the verdict.
 // nightIndex selects which night (0 = Tonight, 1 = +1, 2 = +2).
 
 pragma ComponentBehavior: Bound

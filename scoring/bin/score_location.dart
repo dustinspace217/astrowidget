@@ -23,15 +23,15 @@
 // scoreLocation() — which would be a breaking change for astroplan — this
 // wrapper computes the broadband score from the engine's defaults, then
 // rebuilds a narrowband score by re-weighting the engine-returned factor
-// scores with reduced moon/darkness weights.  This is a site-level BB/NB
-// approximation, not the per-target distinction scoreTarget() makes.
+// scores with a much-reduced sky-brightness weight (narrowband rejects
+// moonlight + light pollution).  This is a site-level BB/NB approximation,
+// not the per-target distinction scoreTarget() makes.
 // See ~/Claude/astrowidget/docs/superpowers/specs/2026-05-28-astrowidget-design.md
 // §6.2 for the spec and §8 for the recommendation algorithm.
 
 import 'dart:convert';
 import 'dart:io';
 import 'package:astrowidget_scoring/astro/moon_geometry.dart';
-import 'package:astrowidget_scoring/astro/solar_system.dart' show BodyPosition;
 import 'package:astrowidget_scoring/astro/visibility.dart';
 import 'package:astrowidget_scoring/scoring/scoring_engine.dart';
 import 'package:astrowidget_scoring/scoring/veto_evaluator.dart';
@@ -43,27 +43,36 @@ import 'package:astrowidget_scoring/weather/weather_models.dart';
 
 // Narrowband score — HEURISTIC, NOT a calibrated engine mode.
 //
-// IMPORTANT HONESTY NOTE (2026-05-28): astroplan's scoreLocation() has NO
-// ImagingMode parameter — only scoreTarget() does. There is no calibrated
-// narrowband location-scoring path in the engine. So this wrapper computes
-// a heuristic NB score by re-weighting the broadband run's already-computed
-// factor sub-scores (cloud/stability/darkness/moon) with the constants below.
-// This is a reasonable approximation — narrowband filters pass ~1nm around
-// emission lines and reject ~99% of moonlight, so darkness/moon should matter
-// far less — but the WEIGHTS THEMSELVES ARE UNCALIBRATED first-principles
-// estimates, not derived from imaging outcomes like the engine's broadband
-// constants are. The output is tagged `method: "heuristic-reweight-v1"` so
-// consumers (and the user) know not to over-trust the NB number relative to
-// the calibrated broadband score. Calibrating these is tracked as a v2 item.
+// IMPORTANT HONESTY NOTE (2026-05-28, updated 2026-06-03 for the Phase-1 factor
+// set): scoreLocation() has no narrowband-aware path, so this wrapper computes a
+// heuristic NB score by re-weighting the broadband run's already-computed factor
+// sub-scores. The Phase-1 redesign changed the factor set to
+// {cloud, stability, skyBrightness, transparency?} — `darkness` was removed (it was
+// a constant 100 that inflated every score) and the moon now lives INSIDE
+// skyBrightness as a geometry-aware burden. The NB re-weight reflects the physics
+// that narrowband filters pass ~1 nm around emission lines and reject ~99% of
+// moonlight + light pollution, so SKY BRIGHTNESS barely matters for NB (weight 0.08
+// vs 0.8 broadband — spec §5a's ×0.05–0.10; THIS factor is the BB/NB axis), while
+// TRANSPARENCY (haze/smoke that blocks the emission lines themselves) matters about
+// as much as for broadband (0.9). Cloud is a hard blocker either way (1.0).
 //
-// Mathematically the re-weight is sound (a weighted mean of independent
-// 0-100 sub-scores), but it is NOT equivalent to re-running the engine with
-// narrowband-aware factor scoring — there is no such path to run.
-const double _nbCloudWeight = 1.0;
-const double _nbStabilityWeight = 0.65;
-const double _nbDarknessWeight = 0.15; // vs 0.8 broadband — moon-glow tolerant
-const double _nbMoonWeight = 0.05; // vs 0.6 broadband — near-irrelevant for NB
-const String _nbMethod = 'heuristic-reweight-v1';
+// The WEIGHTS THEMSELVES ARE UNCALIBRATED first-principles estimates, not derived
+// from imaging outcomes like the engine's broadband constants. Output is tagged
+// `method: "heuristic-reweight-v2"` (bumped from v1 — the factor set changed) so
+// consumers know not to over-trust the NB number relative to the broadband score.
+//
+// Mathematically the re-weight is a weighted mean over the PRESENT factors only —
+// an absent factor (e.g. transparency when there's no AOD) is SKIPPED, never scored
+// as 0. A 0 would drag NB below BB and resurrect the very BB>NB inversion this
+// redesign fixes (the bug the Phase-1 verifiers caught). It is NOT equivalent to
+// re-running the engine with narrowband-aware factor scoring — there is no such path.
+const Map<String, double> _nbWeights = <String, double>{
+	'cloud': 1.0,
+	'stability': 0.65,
+	'skyBrightness': 0.08, // NB rejects ~99% of moonlight/LP — spec §5a
+	'transparency': 0.9,   // haze blocks emission lines too — matters like BB
+};
+const String _nbMethod = 'heuristic-reweight-v2';
 
 /// Equipment-protection precipitation veto: fires when the PEAK (maximum)
 /// precipitation probability across the exposure (sunset→sunrise) window
@@ -211,7 +220,10 @@ Future<void> main(List<String> args) async {
 	}
 
 	final out = <String, dynamic>{
-		'schema_version': 1,
+		// Schema 2 (2026-06-03, Phase-1 scoring redesign): factors map is now
+		// {cloud, stability, skyBrightness, transparency?} (darkness/moon removed);
+		// each night gains best_window + managed; NB method is heuristic-reweight-v2.
+		'schema_version': 2,
 		'computed_at': DateTime.now().toUtc().toIso8601String(),
 		'sites': results,
 	};
@@ -235,6 +247,12 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 	final label = site['label'] as String? ?? id;
 	final lat = (site['lat'] as num).toDouble();
 	final lon = (site['lon'] as num).toDouble();
+	// Phase-1 site inputs from the fetcher (spec §4/§5):
+	//   bortle  — light-pollution class 1–9, or null → engine default baseline
+	//   managed — HOME (false) vs REMOTE/dome (true). A REMOTE dome is weatherproof,
+	//             so it skips the precip EQUIPMENT veto (applied in _scoreOneNight).
+	final siteBortle = (site['bortle'] as num?)?.toInt();
+	final managed = site['managed'] as bool? ?? false;
 
 	// Per-site veto thresholds with sensible defaults.
 	final thresholds = (site['thresholds'] as Map<String, dynamic>?) ?? const {};
@@ -251,10 +269,22 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 	final hourlyList = (site['hourly'] as List)
 		.map((h) => HourlyWeather.fromJson(h as Map<String, dynamic>))
 		.toList();
+	// Per-hour AOD list for the transparency factor. Null / empty / absent → a null
+	// forecast.airQuality → the engine OMITS transparency entirely (it is never
+	// scored as 0 — absence ≠ worst haze; that inversion is the Phase-1 null-
+	// polarity rule). AirQuality.fromJson defaults every non-AOD field, so an
+	// AOD-only row from the fetcher is a complete, valid AirQuality.
+	final aqRaw = site['airQuality'] as List?;
+	final airQuality = (aqRaw == null || aqRaw.isEmpty)
+		? null
+		: aqRaw
+			.map((a) => AirQuality.fromJson(a as Map<String, dynamic>))
+			.toList();
 	final forecast = WeatherForecast(
 		locationId: 0, // unused by scoreLocation
 		fetchedAt: nowUtc,
 		hours: hourlyList,
+		airQuality: airQuality,
 	);
 
 	// Score the next three nights.  "Tonight" = the next astro dark window
@@ -268,6 +298,8 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 			forecast: forecast,
 			lat: lat,
 			lon: lon,
+			siteBortle: siteBortle,
+			managed: managed,
 			windMaxKmh: windMaxKmh,
 			precipMaxPct: precipMaxPct,
 			dewSpreadMinC: dewSpreadMinC,
@@ -292,6 +324,8 @@ Map<String, dynamic> _scoreOneNight({
 	required WeatherForecast forecast,
 	required double lat,
 	required double lon,
+	required int? siteBortle,
+	required bool managed,
 	required double windMaxKmh,
 	required double precipMaxPct,
 	required double dewSpreadMinC,
@@ -311,6 +345,10 @@ Map<String, dynamic> _scoreOneNight({
 			'moon': null,
 			'broadband': {'score': 0, 'verdict': 'dontBother', 'vetoes': []},
 			'narrowband': {'score': 0, 'verdict': 'dontBother', 'vetoes': []},
+			// Keep the schema-2 top-level keys present even in this degenerate path
+			// so consumers never hit an undefined best_window/managed.
+			'best_window': null,
+			'managed': managed,
 			'recommendation': 'Neither',
 			'reasons': ['No astronomical darkness on this date.'],
 		};
@@ -350,11 +388,18 @@ Map<String, dynamic> _scoreOneNight({
 		}
 	}
 
-	// Broadband baseline: call astroplan's scoreLocation() with engine defaults.
+	// Broadband baseline: call the engine. Phase-1 — pass the site Bortle (sky-
+	// brightness baseline) and the moon's PEAK altitude across the dark window
+	// (maxMoonAlt, computed above) so the geometry-aware moon burden applies. Using
+	// the peak is a conservative whole-night summary: a moon high for any part of
+	// the night compromises that part. (managed is NOT passed — the engine scores
+	// uniformly; the HOME/REMOTE split is the precip veto policy below.)
 	final loc = scoreLocation(
 		forecast: forecast,
 		darkWindow: darkWindow,
 		moonIlluminationPercent: moonIllum,
+		siteBortle: siteBortle,
+		moonAltitude: maxMoonAlt,
 	);
 
 	// Imaging-window hours (astronomical dark): used for the cloud / wind /
@@ -388,38 +433,58 @@ Map<String, dynamic> _scoreOneNight({
 	// of rain → cover up"). Cloud/wind/condensation keep the shared engine
 	// checks over the imaging window. Priority order (cloud → precip → wind →
 	// condensation) matches evaluateAll.
+	//
+	// Mode-aware (spec §4): cloud (true overcast), wind (scope shake / dome auto-
+	// close) and condensation (dew on optics) fire in BOTH modes. The PRECIP veto
+	// is EQUIPMENT protection for an UNCOVERED scope, so it fires in HOME mode only
+	// — a REMOTE dome is weatherproof and self-closes, so precip there is not an
+	// equipment threat (and a rainy night is already overcast → the cloud veto
+	// covers viability). This is the concrete HOME/REMOTE behavioural split.
 	final VetoResult? firedVeto =
 		VetoEvaluator.checkCloud(loc.factorScores['cloud'] ?? 0) ??
-		_peakPrecipVeto(exposureHours, precipMaxPct) ??
+		(managed ? null : _peakPrecipVeto(exposureHours, precipMaxPct)) ??
 		VetoEvaluator.checkWind(windowHours, windMaxKmh) ??
 		VetoEvaluator.checkCondensation(windowHours, dewSpreadMinC);
 	final vetoes = firedVeto == null
 		? const <Map<String, String>>[]
 		: <Map<String, String>>[{'name': firedVeto.vetoName, 'reason': firedVeto.reason}];
 
-	// Narrowband: re-weight the engine-returned factor scores with NB weights.
-	final cloudS = loc.factorScores['cloud'] ?? 0;
-	final stabilityS = loc.factorScores['stability'] ?? 0;
-	final darknessS = loc.factorScores['darkness'] ?? 0;
-	final moonS = loc.factorScores['moon'] ?? 0;
-	final nbWeightedSum = _nbCloudWeight * cloudS +
-		_nbStabilityWeight * stabilityS +
-		_nbDarknessWeight * darknessS +
-		_nbMoonWeight * moonS;
-	final nbTotalW = _nbCloudWeight + _nbStabilityWeight +
-		_nbDarknessWeight + _nbMoonWeight;
-	final nbScore = (nbWeightedSum / nbTotalW).round().clamp(0, 100);
+	// Narrowband: re-weight the engine's PRESENT factor scores with _nbWeights.
+	// Iterate the factors actually present (fix 2) — an absent factor (e.g.
+	// transparency with no AOD, or any factor a future engine version drops) is
+	// SKIPPED, never read as 0. A 0 would drag NB below BB and resurrect the
+	// inversion this redesign fixes. skyBrightness's tiny NB weight (0.08) is what
+	// makes NB exceed BB under a bright moon — the BB/NB axis.
+	var nbWeightedSum = 0.0;
+	var nbTotalW = 0.0;
+	loc.factorScores.forEach((key, score) {
+		final w = _nbWeights[key];
+		if (w == null) return; // factor not part of the NB model — skip it
+		nbWeightedSum += w * score;
+		nbTotalW += w;
+	});
+	final nbRaw = nbTotalW > 0
+		? (nbWeightedSum / nbTotalW).round().clamp(0, 100)
+		: 0;
+	// Same CLOUD GATE the engine applies to broadband (spec §1): opaque cloud blocks
+	// emission lines too, so narrowband can't beat the cloud factor either. Without
+	// this, the tiny skyBrightness NB weight lets a clear-sky-ish NB read "good" at
+	// heavy cloud. Cap NB at the cloud sub-score (no dart:math import here — a plain
+	// min via ternary).
+	final cloudFactor = loc.factorScores['cloud'] ?? 0;
+	final nbScore = nbRaw < cloudFactor ? nbRaw : cloudFactor;
 	final nbVerdict = Verdict.fromScore(nbScore);
 
 	// Compute recommendation per spec §8.
+	// Green = genuinely GOOD (spec §5b): require ≥ good. A marginal (40–59) night is
+	// NOT a green pass. The old code accepted marginal — which, together with the
+	// removed always-100 darkness factor inflating the composite, is how an overcast
+	// or moonlit night used to read green. Dropping marginal is half the incident fix
+	// (removing the darkness inflation is the other half).
 	final bbPass = vetoes.isEmpty &&
-		(loc.verdict == Verdict.excellent ||
-		 loc.verdict == Verdict.good ||
-		 loc.verdict == Verdict.marginal);
+		(loc.verdict == Verdict.excellent || loc.verdict == Verdict.good);
 	final nbPass = vetoes.isEmpty &&
-		(nbVerdict == Verdict.excellent ||
-		 nbVerdict == Verdict.good ||
-		 nbVerdict == Verdict.marginal);
+		(nbVerdict == Verdict.excellent || nbVerdict == Verdict.good);
 	final recommendation = bbPass && nbPass
 		? 'BB+NB'
 		: nbPass
@@ -449,8 +514,21 @@ Map<String, dynamic> _scoreOneNight({
 			'score': nbScore,
 			'verdict': nbVerdict.name,
 			'vetoes': vetoes, // same hard-stop vetoes apply
-			'method': _nbMethod, // 'heuristic-reweight-v1' — not engine-calibrated
+			'method': _nbMethod, // 'heuristic-reweight-v2' — not engine-calibrated
 		},
+		// Best clear-sky window within the dark window (≤30% cloud), or null if
+		// none. The structured form of the localized "Best window" reason — the
+		// HOME-mode gambling aid (where the gaps are). UTC ISO-8601; UI localizes.
+		'best_window': loc.bestWindow == null
+			? null
+			: {
+				'start': loc.bestWindow!.start.toIso8601String(),
+				'end': loc.bestWindow!.end.toIso8601String(),
+			},
+		// HOME (false) vs REMOTE (true): lets the UI frame the verdict ("dome site")
+		// and records which veto policy was applied this run (precip veto skipped
+		// when true).
+		'managed': managed,
 		'recommendation': recommendation,
 		'precip_peak_pct': precipPeakPct.round(),
 		'reasons': _localizeReasons(loc),

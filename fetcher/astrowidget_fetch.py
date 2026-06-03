@@ -127,6 +127,10 @@ OPEN_METEO_HOURLY_VARS = ",".join([
 	"wind_speed_10m", "wind_gusts_10m",
 	"precipitation_probability", "precipitation",
 	"visibility",
+	# 250 hPa jet-stream wind — the forecastable driver of astronomical seeing
+	# (Phase 1, spec §5/§2a). Rides the existing forecast call, no extra HTTP.
+	# Open-Meteo exposes 200/250/300 hPa; 250 is the canonical jet level.
+	"wind_speed_250hPa",
 ])
 
 # Days of forecast to request from Open-Meteo. We score 3 nights (tonight +2),
@@ -135,6 +139,11 @@ OPEN_METEO_HOURLY_VARS = ",".join([
 # fabricated defaults. Requesting 4 days guarantees the +2 window is fully
 # covered. (Fix for the horizon-truncation finding, 2026-05-28 review.)
 OPEN_METEO_FORECAST_DAYS = 4
+
+# Open-Meteo Air-Quality API (separate endpoint, free, no key) — supplies aerosol
+# optical depth (AOD-550nm) for the Phase-1 transparency factor. One extra HTTP
+# call per site; best-effort (a failure never aborts the run — spec §7).
+OPEN_METEO_AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 
 # Open-Meteo models used in the cloud ensemble + convergence display. Three
 # DISTINCT models (ECMWF, NOAA GFS, DWD ICON). We deliberately do NOT include
@@ -351,6 +360,46 @@ def load_config() -> dict[str, Any]:
 				f"got {site['primary']!r}.",
 			)
 		site["primary"] = bool(site.get("primary", True))
+
+		# The `managed` flag (spec §4) selects the scoring MODE for this site:
+		#   false (default) = HOME mode — a clear-starved site like Bainbridge where
+		#     Dustin images cloudy, low-precip nights gambling for sucker holes, so
+		#     partial cloud is NOT a hard gate; output is the best clear WINDOW plus
+		#     an honest per-filter verdict, and only precip/wind/dew hard-veto.
+		#   true  = REMOTE/managed mode — a hosted dome (iTelescope) that physically
+		#     self-gates to clear sky, so the widget gives a clean go/no-go and cloud
+		#     DOES gate the verdict.
+		# Same loud-rejection contract as `primary` (the string "false" is truthy in
+		# Python, so a typo would otherwise silently flip the mode). Documented for
+		# other users in config.example.toml.
+		if "managed" in site and not isinstance(site["managed"], bool):
+			_fail_config(
+				f"Invalid 'managed' for site '{sid}'",
+				f"managed must be the TOML boolean true or false, "
+				f"got {site['managed']!r}.",
+			)
+		site["managed"] = bool(site.get("managed", False))
+
+		# Optional per-site `bortle` light-pollution class (spec §5a/§8): sets the
+		# sky-brightness baseline. Absent → None, and the Dart scorer falls back to a
+		# documented default baseline so the geometry-aware moon penalty still applies
+		# EVERYWHERE (the Phase-1 fix — see locationSkyBrightnessScore). When present
+		# it must be an int 1–9; anything else is rejected loudly rather than silently
+		# clamped, since a typo'd Bortle would quietly mis-score every night. A future
+		# release may auto-derive this from lat/lon; the override always wins.
+		if "bortle" in site:
+			bval = site["bortle"]
+			# bool is an int subclass — exclude it so a stray `true` can't read as
+			# Bortle 1.
+			if (isinstance(bval, bool) or not isinstance(bval, int)
+					or not (1 <= bval <= 9)):
+				_fail_config(
+					f"Invalid 'bortle' for site '{sid}'",
+					f"bortle must be an integer 1–9, got {site['bortle']!r}.",
+				)
+			site["bortle"] = bval
+		else:
+			site["bortle"] = None
 
 	# Per-site veto threshold validation. Adversarial review flagged that
 	# wind_max_kmh = -5 (etc.) silently produces "Neither" for every hour —
@@ -591,6 +640,86 @@ def fetch_open_meteo_convergence(
 		# Convergence is a nice-to-have; never let it fail the forecast.
 		sys.stderr.write("astrowidget: convergence fetch failed (non-fatal)\n")
 		return {}
+
+
+def fetch_open_meteo_air_quality(lat: float, lon: float) -> dict[str, list[Any]]:
+	"""
+	Fetches aerosol optical depth (AOD-550nm) from the Open-Meteo Air-Quality API
+	for the Phase-1 transparency factor (spec §5: thin haze/smoke is the
+	under-forecast killer that ruins faint-signal frames). Separate endpoint,
+	free, no key.
+
+	Best-effort, exactly like fetch_open_meteo_convergence: on ANY failure this
+	returns {} and the transparency factor is simply omitted downstream — AOD must
+	never abort the run (spec §7: the score stays fully functional on the free
+	baseline).
+
+	Receives: lat, lon — decimal degrees.
+	Returns: the "hourly" dict ({"time": [...], "aerosol_optical_depth": [...]}),
+	    or {} on failure.
+	"""
+	params: dict[str, Any] = {
+		"latitude": lat,
+		"longitude": lon,
+		"hourly": "aerosol_optical_depth",
+		"forecast_days": OPEN_METEO_FORECAST_DAYS,
+		"timezone": "UTC",
+	}
+	try:
+		r = requests.get(OPEN_METEO_AIR_QUALITY_URL, params=params, timeout=HTTP_TIMEOUT)
+		r.raise_for_status()
+		parsed = r.json()
+		hourly = parsed.get("hourly", {})
+		if not isinstance(hourly, dict) or "time" not in hourly:
+			return {}
+		return hourly
+	except (requests.RequestException, ValueError):
+		# Transparency is a baseline-optional enhancement; never fail the run.
+		sys.stderr.write("astrowidget: air-quality (AOD) fetch failed (non-fatal)\n")
+		return {}
+
+
+def build_air_quality_rows(aq_hourly: dict[str, list[Any]]) -> list[dict[str, Any]]:
+	"""
+	Transforms the Open-Meteo air-quality "hourly" dict into the row list the Dart
+	`AirQuality.fromJson` expects — one {"time", "aerosol_optical_depth"} per hour.
+
+	Receives: aq_hourly — the dict returned by fetch_open_meteo_air_quality
+	    ({"time": [...], "aerosol_optical_depth": [...]}), or {} on fetch failure.
+	Returns: list of per-hour dicts. EMPTY list when AOD is unavailable, which the
+	    Dart side reads as "no transparency data" and OMITS the factor entirely — it
+	    is NOT scored as zero (absence ≠ worst transparency; that inversion is the
+	    Phase-1 null-polarity rule, mirrored from the 250 hPa handling above).
+
+	Only "time" + "aerosol_optical_depth" are emitted: AirQuality.fromJson defaults
+	every other field (pm2_5, us_aqi, …) to 0 and the scorer reads only AOD, so an
+	AOD-only row is a complete, valid AirQuality. We pair element-wise and stop at
+	the shorter array so a truncated AOD response never fabricates tail hours (the
+	same length-mismatch defense merge_hourly uses).
+	"""
+	if not aq_hourly:
+		return []
+	times = aq_hourly.get("time")
+	aod = aq_hourly.get("aerosol_optical_depth")
+	# Defensive: the air-quality API can return a key PRESENT but null (e.g.
+	# {"time": [...], "aerosol_optical_depth": null}), or rarely a non-list. A
+	# `.get("k", [])` default only fires when the key is ABSENT, so a present-null
+	# would yield None and crash len(None) — aborting the whole run and breaking the
+	# "AOD must never abort" guarantee (spec §7). Treat anything that is not a
+	# non-empty list as "no AOD" and omit transparency downstream.
+	if not isinstance(times, list) or not isinstance(aod, list) or not times:
+		return []
+	n = min(len(times), len(aod))
+	rows: list[dict[str, Any]] = []
+	for i in range(n):
+		v = aod[i]
+		# Coerce a non-finite AOD to None: AirQuality.fromJson reads a null
+		# aerosol_optical_depth as "station doesn't report it", which the engine
+		# treats as no-smoke-data — preferable to a confident NaN-derived reading.
+		if isinstance(v, float) and not math.isfinite(v):
+			v = None
+		rows.append({"time": times[i], "aerosol_optical_depth": v})
+	return rows
 
 
 def fetch_7timer(lat: float, lon: float) -> dict[datetime, tuple[Any, Any]]:
@@ -924,6 +1053,12 @@ def merge_hourly(
 	precip_prob = col("precipitation_probability")
 	precip = col("precipitation")
 	visibility = col("visibility")
+	# 250 hPa jet-stream wind — the Phase-1 seeing input (spec §5: upper-level
+	# wind is the right ALTITUDE for seeing; surface stability was the wrong
+	# proxy). Read None-preserving (NOT _safe with a 0.0 default): a missing hour
+	# means "no jet data → skip it in the blend", whereas 0.0 would mean a real
+	# dead-calm jet (a perfect-seeing signal). The two must never collapse.
+	jet250 = col("wind_speed_250hPa")
 
 	out: list[dict[str, Any]] = []
 	for i in range(min_complete):
@@ -955,6 +1090,10 @@ def merge_hourly(
 			"precipitation_probability": _safe(precip_prob, i, 50.0),
 			"precipitation": _safe(precip, i, 0.0),
 			"visibility": _safe(visibility, i, 10000.0),
+			# 250 hPa jet wind — None when absent (NOT 0.0). The Dart HourlyWeather
+			# reads this nullable and the seeing blend SKIPS null hours; a 0.0 here
+			# would be scored as an ideal calm jet. See jet250/_safe_optional above.
+			"wind_speed_250hPa": _safe_optional(jet250, i),
 			# Seeing/transparency, source-agnostic. None (not a fabricated
 			# default) when no matching hour exists — display shows "—" and the
 			# enrichment averaging skips it, rather than inventing a value.
@@ -981,6 +1120,29 @@ def _safe(arr: list[Any], i: int, default: Any) -> Any:
 		return default
 	if isinstance(v, float) and not math.isfinite(v):
 		return default
+	return v
+
+
+def _safe_optional(arr: list[Any], i: int) -> Any:
+	"""Like _safe but PRESERVES None instead of substituting a default.
+
+	For OPTIONAL columns where absence is semantically distinct from any real
+	value — currently wind_speed_250hPa: None means "no jet-stream data for this
+	hour" (the Dart seeing blend skips it), whereas 0.0 would mean a genuinely
+	dead-calm jet (a perfect-seeing signal). Never collapse the two — that is the
+	polarity trap the Phase-1 redesign explicitly guards against.
+
+	Receives: arr — a (possibly short) value list; i — the hour index.
+	Returns: the finite numeric value at i, or None if out of bounds / None /
+	    non-finite. Unlike _safe there is NO default substitution.
+	"""
+	if i >= len(arr):
+		return None
+	v = arr[i]
+	if v is None:
+		return None
+	if isinstance(v, float) and not math.isfinite(v):
+		return None
 	return v
 
 
@@ -1037,7 +1199,7 @@ def enrich_night_factors(
 	averaged over the dark window, mapped to their documented labels, and
 	surfaced for the QML to render.
 
-	The Dart binary's broadband.factors (cloud/stability/darkness/moon SCORES)
+	The Dart binary's broadband.factors (cloud/stability/skyBrightness/transparency SCORES)
 	remain the scoring breakdown; displayFactors is the separate
 	weather-readout the user asked for ("all the astro-specific weather info").
 
@@ -1725,6 +1887,11 @@ def main() -> int:
 		# Parsed by load_config (default true). .get() keeps main() working for
 		# hand-built configs in tests that predate the flag.
 		primary = site_cfg.get("primary", True)
+		# Phase-1 scoring inputs, both validated/defaulted by load_config:
+		#   managed → HOME (false) vs REMOTE (true) scoring mode (spec §4)
+		#   bortle  → light-pollution class 1–9, or None (Dart default baseline)
+		managed = site_cfg.get("managed", False)
+		bortle = site_cfg.get("bortle")  # None when not configured
 		# Defensive: thresholds section may be missing or non-dict.
 		thresholds_section = cfg.get("thresholds")
 		if not isinstance(thresholds_section, dict):
@@ -1738,6 +1905,13 @@ def main() -> int:
 			om = fetch_open_meteo(lat, lon)
 			conv_hourly = fetch_open_meteo_convergence(
 				lat, lon, OPEN_METEO_CONVERGENCE_MODELS
+			)
+			# AOD-550nm for the Phase-1 transparency factor (spec §5). Universal —
+			# both the Astrospheric and the free path consume it. Best-effort: {} on
+			# failure → build_air_quality_rows returns [] → the Dart wrapper OMITS the
+			# transparency factor (it is never scored as zero). Separate free endpoint.
+			air_quality_rows = build_air_quality_rows(
+				fetch_open_meteo_air_quality(lat, lon)
 			)
 
 			# Astrospheric eligibility is derived from lat/lon (no per-site flag).
@@ -1822,6 +1996,13 @@ def main() -> int:
 				"lon": lon,
 				"thresholds": thresholds,
 				"hourly": hourly,
+				# Phase-1 additions (spec §4/§5). bortle may be None (Dart falls back
+				# to the default baseline); managed selects HOME vs REMOTE mode;
+				# airQuality is the per-hour AOD list ([] when unavailable → the
+				# transparency factor is omitted, not zeroed).
+				"bortle": bortle,
+				"managed": managed,
+				"airQuality": air_quality_rows,
 			})
 			site_results.append({
 				"id": sid,

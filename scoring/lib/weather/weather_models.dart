@@ -62,6 +62,12 @@ class HourlyWeather {
 	/// Atmospheric visibility in metres.
 	final double visibility;
 
+	/// 250 hPa (jet-stream level) wind speed in km/h — the forecastable driver of
+	/// astronomical seeing (Phase 1, spec §5/§2a). NULLABLE on purpose: null means
+	/// "no jet data" so the seeing blend SKIPS it, distinct from 0.0 which would be
+	/// a dead-calm jet = falsely excellent seeing. NEVER default this to 0.0.
+	final double? windSpeed250hPa;
+
 	/// Creates an [HourlyWeather] with all fields.
 	const HourlyWeather({
 		required this.time,
@@ -77,6 +83,7 @@ class HourlyWeather {
 		required this.precipitationProbability,
 		required this.precipitation,
 		required this.visibility,
+		this.windSpeed250hPa, // nullable, NOT required — old cache/test JSON omits it
 	});
 
 	/// Deserializes from a JSON map (one hour's worth of data).
@@ -118,6 +125,9 @@ class HourlyWeather {
 				(json['precipitation_probability'] as num?)?.toDouble() ?? 50.0,
 			precipitation: (json['precipitation'] as num?)?.toDouble() ?? 0.0,
 			visibility: (json['visibility'] as num?)?.toDouble() ?? 10000.0,
+			// NO `?? 0.0`: null = "no jet data" (the seeing blend skips it); 0.0
+			// would read as a dead-calm jet = falsely excellent seeing. (Phase 1.)
+			windSpeed250hPa: (json['wind_speed_250hPa'] as num?)?.toDouble(),
 		);
 	}
 
@@ -139,6 +149,7 @@ class HourlyWeather {
 		'precipitation_probability': precipitationProbability,
 		'precipitation': precipitation,
 		'visibility': visibility,
+		'wind_speed_250hPa': windSpeed250hPa,
 	};
 }
 

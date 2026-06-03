@@ -30,6 +30,16 @@ time, and changes here do not flow back to astroplan (and vice-versa).
 window). That helper is also a legitimate addition to upstream astroplan, so it
 exists in both — independently maintained.
 
+- `lib/scoring/sky_brightness.dart` + `lib/scoring/scoring_engine.dart` — the
+  Phase-1 location-scoring redesign (geometry-aware moon `moonBurden` +
+  `locationSkyBrightnessScore`; a 250 hPa jet seeing input; an AOD transparency
+  factor; a cloud gate; the darkness factor removed). astrowidget-specific.
+- `test/` + the `test:` dev-dependency — astrowidget's own Dart unit tests for the
+  redesign physics (NOT vendored from astroplan, which ships no tests here). Run
+  with `dart test`. The Python suite under `../tests/` exercises the compiled
+  binary end-to-end; these Dart tests cover the pure scoring functions the binary
+  can't isolate (e.g. moon illumination vs. altitude varied independently).
+
 ## Building the binary
 
 From this directory:

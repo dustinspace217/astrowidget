@@ -629,6 +629,39 @@ int? _smokeScore(
 	return (total / count).round();
 }
 
+/// Upper-level "seeing" score (0-100) from the 250 hPa jet-stream wind.
+///
+/// Seeing — the atmospheric turbulence that smears stars — is driven mainly by
+/// high-altitude wind shear, NOT surface weather. The prior model used a
+/// surface-stability proxy alone, which is the wrong ALTITUDE (spec §5). We
+/// average the 250 hPa wind across the window's hours that REPORT it and map low
+/// wind → good seeing.
+///
+/// POLARITY (load-bearing): a null windSpeed250hPa is a DATA GAP and is skipped —
+/// it is NOT a calm jet. Treating null as 0 would score a missing forecast as
+/// ideal seeing. This mirrors the fetcher's _safe_optional handling.
+///
+/// `good: 15, bad: 100` km/h is a directional default (spec §5/§10): a near-calm
+/// jet images sharp; a 100+ km/h jet stream ruins seeing. Returns null when NO
+/// hour in the window reports 250 hPa wind, so the caller falls back to the
+/// surface-stability proxy rather than scoring a phantom value.
+///
+/// Receives: [hours] — the window's hourly weather.
+/// Returns: seeing score 0-100, or null if the window has no 250 hPa data.
+int? _jetSeeingScore(List<HourlyWeather> hours) {
+	var total = 0.0;
+	var count = 0;
+	for (final h in hours) {
+		final jet = h.windSpeed250hPa;
+		if (jet == null) continue; // data gap — NOT a calm jet (polarity)
+		total += jet;
+		count++;
+	}
+	if (count == 0) return null;
+	final avgJet = total / count;
+	return _linearScore(avgJet, good: 15.0, bad: 100.0);
+}
+
 /// Filters hourly weather data to only hours within the effective window.
 ///
 /// Receives:
@@ -1131,6 +1164,15 @@ LocationScore scoreLocation({
 	required DarkWindow darkWindow,
 	required double moonIlluminationPercent,
 	TimeWindow? userWindow,
+	// ── Phase-1 redesign params (all optional → existing callers still compile) ──
+	// siteBortle: light-pollution class 1–9, or null (→ default sky-brightness
+	//   baseline, so the moon penalty still applies). moonAltitude: the moon's
+	//   altitude (deg) at the window — drives the geometry-aware moon burden; null
+	//   → burden 0 (no penalty). The wrapper ALWAYS supplies it in production.
+	// (The HOME/REMOTE `managed` distinction lives in the WRAPPER's veto policy —
+	// the engine scores uniformly. See score_location.dart.)
+	int? siteBortle,
+	double? moonAltitude,
 }) {
 	final reasons = <String>[];
 
@@ -1143,7 +1185,10 @@ LocationScore scoreLocation({
 			score: 0,
 			verdict: Verdict.dontBother,
 			reasons: ['No astronomical darkness tonight.'],
-			factorScores: {'cloud': 0, 'stability': 0, 'darkness': 0, 'moon': 0},
+			// Phase-1 factor set: no more 'darkness'/'moon' keys (darkness was a
+			// constant inflation; moon is folded into skyBrightness). Absent factors
+			// are OMITTED, never zero-filled (fix 2).
+			factorScores: {'cloud': 0, 'stability': 0},
 		);
 	}
 
@@ -1152,54 +1197,103 @@ LocationScore scoreLocation({
 	// Cloud score: average over the window.
 	final cloudFactor = _cloudScore(windowHrs);
 
-	// Veto: near-zero cloud score means imaging is impossible regardless
-	// of other conditions. Don't let stability/darkness mask an overcast sky.
+	// Veto: a near-zero cloud score is ~95%+ solid overcast — no imaging anywhere
+	// (there are no sucker holes in true overcast), so this hard-stops in BOTH
+	// modes. This does NOT violate the spec's "partial cloud never a hard gate" for
+	// HOME: 95% overcast is not "partial". PARTIAL cloud (a workable-with-gaps
+	// night) has cloudFactor > 5 and flows into the composite below, where the
+	// best-window captures the gaps — that is where HOME's gambling nuance lives. A
+	// weighted MEAN cannot let one bad factor veto a clear-but-otherwise-good night
+	// (a clear sky floors the composite ~67), so without this hard stop a rural
+	// HOME site could read "green" under 95% overcast — the exact dishonesty this
+	// redesign removes. The HOME/REMOTE split is the PRECIP veto (wrapper), not this.
 	if (cloudFactor <= 5) {
 		return LocationScore(
 			score: cloudFactor,
 			verdict: Verdict.dontBother,
 			reasons: ['Overcast — cloud cover too thick for imaging.'],
-			factorScores: {'cloud': cloudFactor, 'stability': 0, 'darkness': 0, 'moon': 0},
+			factorScores: {'cloud': cloudFactor, 'stability': 0},
 		);
 	}
 
-	// Stability: compute from window hours if we have enough data.
-	int stabilityFactor;
-	if (windowHrs.length >= 2) {
-		final assessment = assessStability(windowHrs);
-		stabilityFactor = assessment.score;
+	// ── Seeing (atmospheric stability) factor ──
+	// Surface-stability proxy (the prior sole input). 50 is a degenerate sentinel
+	// when there are too few hours to assess — NOT a real measurement.
+	final int surfaceStability =
+		windowHrs.length >= 2 ? assessStability(windowHrs).score : 50;
+	// Blend with the 250 hPa jet score, the physically-correct seeing driver
+	// (spec §5). Correction 3: when stability is the degenerate sentinel, use the
+	// jet ALONE rather than averaging a real jet halfway to a meaningless 50.
+	final jetSeeing = _jetSeeingScore(windowHrs); // null when no 250 hPa data
+	final int stabilityFactor;
+	if (jetSeeing != null && windowHrs.length >= 2) {
+		stabilityFactor = ((jetSeeing + surfaceStability) / 2).round();
+	} else if (jetSeeing != null) {
+		stabilityFactor = jetSeeing;             // stability degenerate → jet alone
 	} else {
-		stabilityFactor = 50; // Not enough data for assessment.
+		stabilityFactor = surfaceStability;      // no jet → surface proxy
 	}
 
-	// Darkness score: proportion of window that's astronomically dark.
-	final darknessFactor = _darknessScore(windowStart, windowEnd, darkWindow);
-
-	// Moon score: simple illumination-based (no target distance needed).
-	// Higher illumination → worse for general imaging.
-	final moonFactor = _linearScore(
-		moonIlluminationPercent,
-		good: 0.0,    // New moon = score 100
-		bad: 100.0,   // Full moon = score 0
+	// ── Sky-brightness factor (Bortle baseline + geometry-aware moon) ──
+	// Replaces the old illumination-only moon term AND the removed darkness factor.
+	// ALWAYS present: locationSkyBrightnessScore never returns null (default
+	// baseline on null Bortle, fix 1), so the moon penalty applies at every site —
+	// including Bainbridge, which has no Bortle. A null moonAltitude yields burden
+	// 0 (no penalty); the wrapper supplies the real altitude in production.
+	final skyBrightnessFactor = locationSkyBrightnessScore(
+		bortle: siteBortle,
+		moonIlluminationPercent: moonIlluminationPercent,
+		moonAltitudeDeg: moonAltitude ?? 0.0,
 	);
 
-	// Weighted average with location-level weights.
-	// Cloud is most important (1.0), stability moderate (0.5),
-	// darkness important (0.8), moon moderate (0.6).
-	const cloudW = 1.0;
-	// Raised from 0.5 — ground-level stability proxy correlates meaningfully
-	// with actual imaging conditions. At 0.5 it barely moved the composite.
-	const stabilityW = 0.65;
-	const darknessW = 0.8;
-	const moonW = 0.6;
+	// ── Transparency (AOD) factor — present ONLY when air-quality data exists ──
+	// _smokeScore returns null when there's no usable AOD in the window. fix 2: we
+	// OMIT it from the map in that case (never write 0 — absence ≠ worst haze).
+	final transparencyFactor =
+		_smokeScore(forecast.airQuality, windowStart, windowEnd);
 
-	final weightedSum = cloudW * cloudFactor +
-		stabilityW * stabilityFactor +
-		darknessW * darknessFactor +
-		moonW * moonFactor;
-	final totalWeight = cloudW + stabilityW + darknessW + moonW;
-
-	final compositeScore = (weightedSum / totalWeight).round().clamp(0, 100);
+	// ── Composite: null-aware weighted mean over the PRESENT factors (fix 2) ──
+	// An absent factor contributes neither score nor weight; it is never scored as
+	// zero (a zero would tank the composite AND, via the wrapper's NB reweight,
+	// flip NB below BB — the exact bug the verifiers caught). cloud/stability/
+	// skyBrightness are always present; transparency is conditional. Weights are
+	// the directional BB weights from spec §5 (Dustin reviews at the commit
+	// boundary; physics-default, re-tune later).
+	final scores = <String, int>{
+		'cloud': cloudFactor,
+		'stability': stabilityFactor,
+		'skyBrightness': skyBrightnessFactor,
+	};
+	if (transparencyFactor != null) {
+		scores['transparency'] = transparencyFactor;
+	}
+	const weights = <String, double>{
+		'cloud': 1.0,
+		'stability': 0.6,
+		'skyBrightness': 0.8,
+		'transparency': 0.9,
+	};
+	var weightedSum = 0.0;
+	var totalWeight = 0.0;
+	for (final key in scores.keys) {
+		final w = weights[key]!;
+		weightedSum += w * scores[key]!;
+		totalWeight += w;
+	}
+	final weightedMean = weightedSum / totalWeight;
+	// CLOUD GATE (spec §1: cloud must GATE, not just average). A weighted mean lets
+	// a good stability/sky/transparency out-vote bad cloud — which is exactly how
+	// 89% cloud read "good" (cloudFactor ~11, but only weight 1.0 of ~3.3). Cap the
+	// composite at the cloud factor: the verdict can never exceed what the cloud
+	// allows — you cannot have a better-than-X night when only X% of the sky is
+	// imageable. This is a SOFT ceiling, NOT a hard veto (spec §4): partial cloud
+	// still flows (a ~50% night caps at ~marginal, NOT Neither) and the best-window
+	// still surfaces the gaps, so HOME's gamble-on-holes nuance survives. Clear
+	// nights (cloudFactor ~90-100) are untouched. Both modes — nobody images through
+	// cloud. The wrapper applies the SAME cap to narrowband (cloud blocks emission
+	// lines too). This is the half of the incident fix the weighted mean missed.
+	final compositeScore =
+		min(weightedMean, cloudFactor.toDouble()).round().clamp(0, 100);
 	final verdict = Verdict.fromScore(compositeScore);
 
 	// Find best window within the night.
@@ -1214,10 +1308,14 @@ LocationScore scoreLocation({
 		reasons.add('Mostly cloudy — limited imaging opportunities.');
 	}
 
-	if (moonIlluminationPercent > 70) {
+	// Narrowband suggestion fires only when the moon is actually UP and bright —
+	// a 95%-illuminated moon BELOW the horizon is a dark sky (spec §5a), so
+	// suggesting narrowband for it would be the same dishonesty the redesign fixes.
+	final moonUp = (moonAltitude ?? 0.0) > 0;
+	if (moonUp && moonIlluminationPercent > 70) {
 		reasons.add(
 			'Moon ${moonIlluminationPercent.toStringAsFixed(0)}% illuminated '
-			'— consider narrowband imaging.',
+			'and up — consider narrowband imaging.',
 		);
 	} else if (moonIlluminationPercent < 15) {
 		reasons.add('Dark moon — excellent for faint DSOs.');
@@ -1235,12 +1333,10 @@ LocationScore scoreLocation({
 		verdict: verdict,
 		bestWindow: bestWindow,
 		reasons: reasons,
-		factorScores: {
-			'cloud': cloudFactor,
-			'stability': stabilityFactor,
-			'darkness': darknessFactor,
-			'moon': moonFactor,
-		},
+		// factorScores carries ONLY the present factors (fix 2) — downstream
+		// (fetcher enrich + QML) treat this map as opaque, and the wrapper's NB
+		// reweight iterates the present keys.
+		factorScores: scores,
 	);
 }
 

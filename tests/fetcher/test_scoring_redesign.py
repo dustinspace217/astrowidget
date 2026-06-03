@@ -1,0 +1,374 @@
+"""
+Tests for the Phase-1 scoring redesign (spec 2026-06-02, plan 2026-06-03).
+
+Covers the new fetcher plumbing and — against the REAL compiled binary — the
+behaviours that motivated the redesign:
+  - the reported incident (heavy cloud at a HOME site read green BB+NB);
+  - the BB>NB inversion under a bright moon (narrowband should beat broadband);
+  - the new schema (factors = {cloud, stability, skyBrightness, transparency?};
+    no more `darkness`/`moon`; best_window + managed per night; NB method v2);
+  - the HOME/REMOTE precip-veto split;
+  - graceful degradation when the optional feeds (AOD, 250 hPa, Bortle) are absent.
+
+The binary-integration tests skip cleanly (not fail) when the binary hasn't been
+built, so the unit suite stays green on a fresh checkout. Build it with:
+  cd scoring && dart pub get && dart build cli -t bin/score_location.dart -o /tmp/b \
+    && cp /tmp/b/bundle/bin/score_location ../bin/astrowidget-score
+"""
+
+import json
+import os
+import subprocess
+import textwrap
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+import astrowidget_fetch as fx
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _safe_optional — None-preserving column reader (the 250 hPa polarity trap)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_safe_optional_preserves_none_not_default():
+	"""Absent/None/non-finite → None (NOT a 0.0 default). A data gap must never
+	read as a real (calm-jet) value."""
+	assert fx._safe_optional([], 0) is None          # out of bounds
+	assert fx._safe_optional([None], 0) is None       # explicit None
+	assert fx._safe_optional([float("nan")], 0) is None
+	assert fx._safe_optional([float("inf")], 0) is None
+	assert fx._safe_optional([42.0], 0) == 42.0       # real value passes through
+	assert fx._safe_optional([0.0], 0) == 0.0         # a real 0 IS preserved
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# merge_hourly — threads wind_speed_250hPa with the right polarity
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _om(hours: int, with_250: bool) -> dict:
+	"""Minimal Open-Meteo response; includes wind_speed_250hPa only if asked."""
+	times = [f"2026-06-09T0{i}:00:00" for i in range(hours)]
+	h = {
+		"time": times,
+		"cloud_cover": [20.0] * hours, "cloud_cover_low": [0.0] * hours,
+		"cloud_cover_mid": [5.0] * hours, "cloud_cover_high": [8.0] * hours,
+		"relative_humidity_2m": [60.0] * hours, "temperature_2m": [12.0] * hours,
+		"dewpoint_2m": [6.0] * hours, "wind_speed_10m": [7.0] * hours,
+		"wind_gusts_10m": [12.0] * hours, "precipitation_probability": [5.0] * hours,
+		"precipitation": [0.0] * hours, "visibility": [25000.0] * hours,
+	}
+	if with_250:
+		h["wind_speed_250hPa"] = [55.0] * hours
+	return {"hourly": h}
+
+
+def test_merge_hourly_threads_250hpa_when_present():
+	"""When Open-Meteo returns 250 hPa wind, every row carries the real value."""
+	rows = fx.merge_hourly(None, _om(3, with_250=True), st_source="7timer")
+	assert rows, "expected merged rows"
+	assert all(r["wind_speed_250hPa"] == 55.0 for r in rows)
+
+
+def test_merge_hourly_250hpa_absent_is_none_not_zero():
+	"""When the model omits 250 hPa wind, rows carry None — NOT 0.0. A 0.0 would
+	be scored downstream as an ideal calm jet."""
+	rows = fx.merge_hourly(None, _om(3, with_250=False), st_source="7timer")
+	assert rows
+	assert all(r["wind_speed_250hPa"] is None for r in rows)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# build_air_quality_rows — AOD → Dart AirQuality rows
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_build_air_quality_rows_empty_input():
+	"""Empty / missing AOD → [] (the Dart side then omits transparency entirely)."""
+	assert fx.build_air_quality_rows({}) == []
+	assert fx.build_air_quality_rows({"time": [], "aerosol_optical_depth": []}) == []
+
+
+def test_build_air_quality_rows_pairs_time_and_aod():
+	rows = fx.build_air_quality_rows({
+		"time": ["2026-06-09T00:00", "2026-06-09T01:00"],
+		"aerosol_optical_depth": [0.07, 0.12],
+	})
+	assert rows == [
+		{"time": "2026-06-09T00:00", "aerosol_optical_depth": 0.07},
+		{"time": "2026-06-09T01:00", "aerosol_optical_depth": 0.12},
+	]
+
+
+def test_build_air_quality_rows_nonfinite_aod_becomes_none():
+	"""A NaN/inf AOD is coerced to None (read as 'no smoke data', not a bogus value)."""
+	rows = fx.build_air_quality_rows({
+		"time": ["2026-06-09T00:00"], "aerosol_optical_depth": [float("nan")],
+	})
+	assert rows == [{"time": "2026-06-09T00:00", "aerosol_optical_depth": None}]
+
+
+def test_build_air_quality_rows_stops_at_shorter_array():
+	"""Truncated AOD array never fabricates tail hours (length-mismatch defense)."""
+	rows = fx.build_air_quality_rows({
+		"time": ["t0", "t1", "t2"], "aerosol_optical_depth": [0.05],
+	})
+	assert len(rows) == 1
+
+
+def test_build_air_quality_rows_present_but_null_array_no_crash():
+	"""A present-but-NULL AOD array — the air-quality API can return
+	{"time": [...], "aerosol_optical_depth": null} — must NOT crash len(None). It
+	returns [] so AOD never aborts the run (the QA review caught this). Also tolerate
+	a non-list body (malformed-but-200) defensively."""
+	assert fx.build_air_quality_rows(
+		{"time": ["t0", "t1"], "aerosol_optical_depth": None}) == []
+	assert fx.build_air_quality_rows(
+		{"time": None, "aerosol_optical_depth": [0.05]}) == []
+	assert fx.build_air_quality_rows(
+		{"time": ["t0"], "aerosol_optical_depth": 0.05}) == []
+
+
+def test_fetch_open_meteo_air_quality_is_best_effort(monkeypatch):
+	"""A network/JSON failure returns {} (never raises) so AOD can't abort the run."""
+	import requests
+
+	def boom(*a, **k):
+		raise requests.RequestException("simulated outage")
+
+	monkeypatch.setattr(fx.requests, "get", boom)
+	assert fx.fetch_open_meteo_air_quality(47.0, -122.0) == {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# load_config — managed (bool) + bortle (1-9 int) validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _write_cfg(tmp_path: Path, sites_block: str) -> Path:
+	content = textwrap.dedent(f"""
+		[open_meteo]
+		models = ["gfs_seamless"]
+
+		{textwrap.dedent(sites_block)}
+	""")
+	path = tmp_path / "config.toml"
+	path.write_text(content, encoding="utf-8")
+	os.chmod(path, 0o600)
+	return path
+
+
+def _load(tmp_path, monkeypatch, sites_block):
+	monkeypatch.setattr(fx, "CONFIG_PATH", _write_cfg(tmp_path, sites_block))
+	with patch.object(fx, "_notify"):
+		return fx.load_config()
+
+
+def test_managed_defaults_false_and_bortle_none(tmp_path, monkeypatch):
+	cfg = _load(tmp_path, monkeypatch, """
+		[[sites]]
+		id = "s"
+		label = "S"
+		lat = 47.0
+		lon = -122.0
+	""")
+	site = cfg["sites"][0]
+	assert site["managed"] is False
+	assert site["bortle"] is None
+
+
+def test_managed_true_and_bortle_accepted(tmp_path, monkeypatch):
+	cfg = _load(tmp_path, monkeypatch, """
+		[[sites]]
+		id = "s"
+		label = "S"
+		lat = 32.0
+		lon = -111.0
+		managed = true
+		bortle = 3
+	""")
+	site = cfg["sites"][0]
+	assert site["managed"] is True
+	assert site["bortle"] == 3
+
+
+def test_managed_non_bool_rejected(tmp_path, monkeypatch):
+	"""A string 'managed' is rejected loudly (the string 'false' is truthy)."""
+	with pytest.raises(SystemExit):
+		_load(tmp_path, monkeypatch, """
+			[[sites]]
+			id = "s"
+			label = "S"
+			lat = 47.0
+			lon = -122.0
+			managed = "true"
+		""")
+
+
+@pytest.mark.parametrize("bad", ["0", "10", '"5"', "true", "4.5"])
+def test_bortle_out_of_range_or_wrong_type_rejected(tmp_path, monkeypatch, bad):
+	with pytest.raises(SystemExit):
+		_load(tmp_path, monkeypatch, f"""
+			[[sites]]
+			id = "s"
+			label = "S"
+			lat = 47.0
+			lon = -122.0
+			bortle = {bad}
+		""")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Binary integration — the redesign's motivating behaviours, end to end
+# ─────────────────────────────────────────────────────────────────────────────
+
+pytestmark_binary = pytest.mark.skipif(
+	not fx.SCORING_BINARY.exists(),
+	reason=f"scoring binary not built at {fx.SCORING_BINARY}",
+)
+
+
+def _run_binary(now_utc: datetime, *, cloud: float, managed: bool,
+				bortle=5, precip=5.0, with_aod=True, with_250=True) -> dict:
+	"""Crafts one stdin payload, runs the real binary, returns tonight's night dict."""
+	hours, aq = [], []
+	for i in range(72):
+		t = (now_utc + timedelta(hours=i)).strftime("%Y-%m-%dT%H:00")
+		row = {
+			"time": t, "cloud_cover": cloud, "cloud_cover_low": cloud * 0.5,
+			"cloud_cover_mid": cloud * 0.3, "cloud_cover_high": cloud * 0.1,
+			"relative_humidity_2m": 55.0, "temperature_2m": 12.0, "dewpoint_2m": 4.0,
+			"wind_speed_10m": 6.0, "wind_gusts_10m": 12.0,
+			"precipitation_probability": precip, "precipitation": 0.0,
+			"visibility": 30000.0,
+		}
+		if with_250:
+			row["wind_speed_250hPa"] = 30.0
+		hours.append(row)
+		if with_aod:
+			aq.append({"time": t, "aerosol_optical_depth": 0.06})
+	# Synthetic round-number coordinates (eastern Oregon, inside the NA domain) —
+	# NOT a real site. The repo is public; tests must never carry real lat/lon.
+	site = {"id": "b", "label": "B", "lat": 45.0, "lon": -120.0,
+			"managed": managed, "hourly": hours, "airQuality": aq}
+	if bortle is not None:
+		site["bortle"] = bortle
+	payload = {"now_utc": now_utc.isoformat(), "sites": [site]}
+	out = subprocess.run([str(fx.SCORING_BINARY)], input=json.dumps(payload),
+						  capture_output=True, text=True)
+	assert out.returncode == 0, f"binary failed: {out.stderr}"
+	parsed = json.loads(out.stdout)
+	assert parsed["schema_version"] == 2
+	return parsed["sites"][0]["nights"][0]
+
+
+@pytestmark_binary
+def test_incident_heavy_cloud_home_not_green():
+	"""THE reported incident: ~89% cloud at a HOME site must NOT read green. Uses
+	bortle=None — the ACTUAL incident-site config (no measured/derived Bortle) the
+	QA review showed STILL read BB+NB green until the cloud gate was added (the
+	default baseline lifted skyBrightness enough to out-vote cloud in the weighted
+	mean). Asserts the RIGHT outcome (Neither + broadband below the good threshold),
+	not merely the absence of the most-green label. The December date gives a REAL
+	dark window (so 89% cloud, not a degenerate empty window, drives the verdict)
+	near a new moon (so cloud is the only variable)."""
+	night = _run_binary(datetime(2026, 12, 9, 6, tzinfo=timezone.utc),
+						 cloud=89.0, managed=False, bortle=None)
+	assert night["recommendation"] == "Neither"
+	assert night["broadband"]["score"] < 60, "heavy cloud must cap below 'good'"
+
+
+@pytestmark_binary
+def test_cloud_gate_caps_heavy_cloud_below_good():
+	"""Spec §1: cloud GATES, not just averages. The broadband score cannot exceed
+	what the cloud allows, so heavy cloud can't be out-voted to 'good' by good
+	stability/sky/transparency. Sweep at a neutral-moon date: clear is green-capable
+	and the score falls monotonically as cloud rises, landing below 'good' well
+	before total overcast."""
+	now = datetime(2026, 12, 9, 6, tzinfo=timezone.utc)  # near-new moon: cloud is the only variable
+	scores = {
+		c: _run_binary(now, cloud=float(c), managed=False, bortle=4)["broadband"]["score"]
+		for c in (2, 30, 50, 70, 89)
+	}
+	assert scores[2] >= 60, "a clear night must be green-capable"
+	assert scores[89] < 60, "89% cloud must be below 'good' (the incident)"
+	assert scores[70] < 60, "70% cloud must be below 'good'"
+	seq = [scores[c] for c in (2, 30, 50, 70, 89)]
+	assert seq == sorted(seq, reverse=True), f"score must fall as cloud rises: {seq}"
+
+
+@pytestmark_binary
+def test_overcast_veto_fires_in_both_modes():
+	"""Deliberate plan deviation (#6): the overcast veto (cloudFactor<=5) fires in
+	BOTH modes — only the PRECIP veto is managed-gated. ~97% cloud must read Neither
+	with a cloud veto whether HOME or REMOTE (nobody images through solid overcast)."""
+	now = datetime(2026, 12, 9, 6, tzinfo=timezone.utc)
+	for managed in (False, True):
+		night = _run_binary(now, cloud=97.0, managed=managed, bortle=4)
+		assert night["recommendation"] == "Neither"
+		veto_names = [v["name"] for v in night["broadband"]["vetoes"]]
+		assert "cloud" in veto_names, f"managed={managed}: overcast must fire the cloud veto"
+
+
+@pytestmark_binary
+def test_schema_factor_set_changed():
+	"""factors = {cloud, stability, skyBrightness, transparency?}; no darkness/moon.
+	best_window + managed present; NB method is v2."""
+	night = _run_binary(datetime(2026, 6, 9, 20, tzinfo=timezone.utc),
+						 cloud=15.0, managed=False)
+	factors = night["broadband"]["factors"]
+	assert "darkness" not in factors and "moon" not in factors
+	assert "skyBrightness" in factors
+	assert "best_window" in night
+	assert night["managed"] is False
+	assert night["narrowband"]["method"] == "heuristic-reweight-v2"
+
+
+@pytestmark_binary
+def test_narrowband_beats_broadband_under_bright_high_moon():
+	"""The reported inversion fix: under a bright, HIGH moon NB must exceed BB
+	(narrowband rejects moonlight). Dec at 32°N puts a full moon ~85° up with a
+	real astronomical dark window."""
+	# Find the brightest-moon clear night in late Dec 2026 at a 32°N site.
+	best = None
+	for d in range(20, 28):
+		now = datetime(2026, 12, d, 6, tzinfo=timezone.utc)
+		night = _run_binary(now, cloud=2.0, managed=False, bortle=4)
+		m = night["moon"]
+		score = m["illumination_pct"] * max(m["max_alt_during_dark"], 0)
+		if best is None or score > best[0]:
+			best = (score, night)
+	night = best[1]
+	assert night["moon"]["illumination_pct"] > 80
+	assert night["moon"]["max_alt_during_dark"] > 40
+	assert night["narrowband"]["score"] > night["broadband"]["score"]
+
+
+@pytestmark_binary
+def test_precip_veto_is_home_only():
+	"""HOME protects an uncovered scope (precip veto fires); a REMOTE weatherproof
+	dome skips it. Same clear-but-rainy input, opposite veto outcome."""
+	now = datetime(2026, 12, 23, 6, tzinfo=timezone.utc)
+	home = _run_binary(now, cloud=2.0, managed=False, precip=80.0)
+	remote = _run_binary(now, cloud=2.0, managed=True, precip=80.0)
+	home_vetoes = [v["name"] for v in home["broadband"]["vetoes"]]
+	remote_vetoes = [v["name"] for v in remote["broadband"]["vetoes"]]
+	assert "precipitation" in home_vetoes
+	assert "precipitation" not in remote_vetoes
+
+
+@pytestmark_binary
+def test_graceful_when_optional_feeds_absent():
+	"""No AOD, no 250 hPa wind, no Bortle → still a valid score, no crash/NaN, and
+	transparency is simply omitted (never scored as 0)."""
+	night = _run_binary(datetime(2026, 12, 23, 6, tzinfo=timezone.utc),
+						 cloud=10.0, managed=False, bortle=None,
+						 with_aod=False, with_250=False)
+	bb = night["broadband"]
+	assert 0 <= bb["score"] <= 100
+	assert "transparency" not in bb["factors"]   # omitted, not zeroed
+	assert "skyBrightness" in bb["factors"]       # always present (default baseline)

@@ -38,10 +38,33 @@ models = ["gfs_seamless", "ecmwf_ifs04", "icon_seamless"]
 # fails (no key, rejected key, outage), the site falls back to the free sources
 # and shows a dismissable notice — there is nothing to configure for that.
 #
-# The one optional per-site flag is layout:
+# Optional per-site flags:
+#
 #   primary  true  -> full always-on column in the popup (default).
 #            false -> collapsed verdict chip; click to expand. Use for sites you
 #                     only check occasionally.
+#
+#   managed  false -> HOME mode (default): a site where YOU image manually and the
+#                     scope sits uncovered. The forecast protects your gear — a real
+#                     chance of overnight rain HARD-VETOES the night (precip veto) —
+#                     while partial cloud is NOT a hard gate (it flows into the score
+#                     plus a "best window" so you can still gamble on clear gaps).
+#            true  -> REMOTE mode: a hosted, weatherproof dome (e.g. iTelescope) that
+#                     closes itself in bad weather. The precip equipment veto is
+#                     SKIPPED (the dome self-protects); the verdict is a clean
+#                     go/no-go driven by cloud + wind. Set this for hosted sites.
+#                     (Truly overcast still reads "Neither" in BOTH modes — nobody
+#                     images through solid cloud.)
+#
+#   bortle   1-9   -> your site's Bortle dark-sky class, the sky-brightness baseline
+#                     (1 = pristine dark, 9 = inner city). It sets how much moonlight
+#                     and light pollution cost the score each night.
+#                     FALLBACK: omit it and the engine uses a documented
+#                     suburban-unknown default baseline (~Bortle 4-5). The
+#                     geometry-aware moon penalty applies either way, so the score
+#                     works without it — bortle only refines the baseline. A future
+#                     release may auto-derive Bortle from your lat/lon; an explicit
+#                     value here always overrides that.
 
 [[sites]]
 id = "site_a"
@@ -50,14 +73,19 @@ lat = 0.0
 lon = 0.0
 timezone = "UTC"
 # primary = true            # full column (this is the default)
+# managed = false           # HOME mode (default): protect an uncovered scope
+# bortle  = 5               # your Bortle class; omit to use the default baseline
 
-# A second site (Astrospheric is used automatically if it's in North America):
+# A hosted / REMOTE observatory — weatherproof dome, so set managed = true
+# (Astrospheric is used automatically if it's in North America):
 # [[sites]]
 # id = "site_b"
 # label = "Remote Observatory"
 # lat = 0.0
 # lon = 0.0
 # timezone = "America/Denver"
+# managed = true            # weatherproof dome: skip the precip equipment veto
+# bortle = 3                # dark hosted site (refines the sky-brightness baseline)
 
 # A site outside North America — automatically uses 7Timer + Open-Meteo:
 # [[sites]]

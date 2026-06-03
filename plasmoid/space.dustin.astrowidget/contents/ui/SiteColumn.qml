@@ -99,6 +99,28 @@ ColumnLayout {
 			elide: Text.ElideRight
 		}
 
+		// REMOTE/dome badge — shown for `managed` (hosted, weatherproof dome) sites.
+		// Signals that this site auto-gates to clear and its precip equipment veto is
+		// OFF (the dome self-protects), so its verdict is a clean go/no-go rather than
+		// the gamble-on-gaps HOME framing. `managed` is per-night but constant for a
+		// site, so reading it off the displayed night is fine.
+		Rectangle {
+			visible: col.night && col.night.managed === true
+			Layout.preferredHeight: domeText.implicitHeight + Kirigami.Units.smallSpacing
+			Layout.preferredWidth: domeText.implicitWidth + Kirigami.Units.smallSpacing * 2
+			radius: Kirigami.Units.smallSpacing
+			color: "transparent"
+			border.width: 1
+			border.color: Qt.alpha(Kirigami.Theme.textColor, 0.4)
+			PlasmaComponents.Label {
+				id: domeText
+				anchors.centerIn: parent
+				text: qsTr("REMOTE")
+				opacity: 0.8
+				font.pixelSize: Kirigami.Theme.smallFont.pixelSize * 0.85
+			}
+		}
+
 		// Verdict pill — rounded rect with theme-tinted fill and contrasting
 		// text. Always carries text label so color is never the sole signal.
 		Rectangle {
@@ -163,6 +185,42 @@ ColumnLayout {
 		}
 		font.pixelSize: Kirigami.Theme.smallFont.pixelSize
 		opacity: 0.85
+		Layout.fillWidth: true
+		elide: Text.ElideRight
+	}
+
+	// Best clear-sky window line — the HOME-mode gamble aid (spec §4). Shown ONLY
+	// when there is a clear stretch (best_window != null) AND it is meaningfully
+	// SHORTER than the whole dark window — i.e. the night is partly cloudy and THIS
+	// is the gap worth shooting. On a fully-clear night best_window ≈ the dark
+	// window, so the "Astro dark" line above already conveys it and this stays
+	// hidden to avoid redundant clutter. Green tint: it's the good news on an
+	// otherwise-compromised night.
+	PlasmaComponents.Label {
+		visible: {
+			if (!col.night || !col.night.best_window
+			    || !col.night.dark_window) return false;
+			const bw = col.night.best_window;
+			const dwMin = col.night.dark_window.duration_minutes || 0;
+			const bwMin = (new Date(bw.end) - new Date(bw.start)) / 60000;
+			return dwMin > 0 && bwMin < dwMin * 0.85;
+		}
+		text: {
+			if (!col.night || !col.night.best_window) return "";
+			const bw = col.night.best_window;
+			const startDate = new Date(bw.start);
+			const start = Qt.formatTime(startDate, "HH:mm");
+			const end = Qt.formatTime(new Date(bw.end), "HH:mm");
+			const tz = Qt.formatDateTime(startDate, "t");
+			const totalMin = Math.round((new Date(bw.end) - startDate) / 60000);
+			const hrs = Math.floor(totalMin / 60);
+			const mins = totalMin % 60;
+			return qsTr("Best clear: %1 → %2 %5 (%3h %4m)").arg(start).arg(end)
+				.arg(hrs).arg(mins).arg(tz);
+		}
+		color: Kirigami.Theme.positiveTextColor
+		font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+		opacity: 0.9
 		Layout.fillWidth: true
 		elide: Text.ElideRight
 	}

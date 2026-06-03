@@ -48,6 +48,25 @@ rationale, and component interfaces), see the internal spec under
   build- or run-time dependency on astroplan; the binary is invoked as a
   subprocess, and the fetcher is otherwise scoring-agnostic.
 
+## Data sources & graceful fallback
+
+The fetcher draws on up to three forecast sources (the diagram above simplifies
+this to two). **Astrospheric is optional**; the free sources cover every site:
+
+| Source | Cost | Coverage | Provides |
+|---|---|---|---|
+| **Open-Meteo** | Free | Global | Multi-model cloud, precip, wind/gusts, visibility, temp/dewpoint |
+| **7Timer!** | Free | Global | Seeing & transparency (NCEP GFS-derived) |
+| **Astrospheric** | Pro key | North America | Higher-quality transparency, seeing, RDPS cloud |
+
+Astrospheric eligibility is **derived automatically from each site's lat/lon** —
+there is no per-site flag. In-coverage sites use it when a key is present;
+everything else (and everything, if no key is set) runs on 7Timer + Open-Meteo.
+When an in-coverage site's Astrospheric call fails (no key / rejected key /
+outage), it falls back to the free sources and surfaces a small dismissable notice
+in the UI; out-of-coverage sites fall back silently. The widget never hard-fails
+for want of a key.
+
 ## Recommendation algorithm
 
 For each site, for each of the next three nights:
@@ -63,6 +82,41 @@ For each site, for each of the next three nights:
 The scoring engine handles the broadband/narrowband distinction internally:
 its moon and darkness weights drop to near zero under narrowband, reflecting
 that narrowband filters reject ~99% of moonlight.
+
+> **Being redesigned (2026).** The algorithm above is the *current* behavior; a
+> redesign is in progress (see the next section).
+
+## Planned: scoring redesign & per-site modes
+
+A scoring redesign is underway (2026), driven by validating the engine against
+real captured-frame outcomes rather than theory. Highlights, for anyone building
+on this:
+
+- **Two per-site scoring modes, set by a `managed` config flag:**
+  - `managed = false` (default — a **home / backyard** site): the imager gambles on
+    partly-cloudy nights for clear gaps, so the score reports the **chance of a
+    usable clear window** instead of a hard cloud gate, and makes **precipitation a
+    hard veto**. Partial cloud degrades the score but never forces "Neither".
+  - `managed = true` (a **remote / hosted** site whose dome opens only when clear):
+    a clean **go / no-go** verdict.
+- **Honest broadband/narrowband:** green means *genuinely good*; "NB only" when the
+  moon or light pollution compromises broadband but the sky is otherwise usable.
+- **Factor changes:** the always-100 astronomical-darkness factor is removed from
+  the weighted score (it carried no per-night information and inverted BB vs NB); a
+  geometry-aware moon model (illumination × altitude, ~zero when the moon is below
+  the horizon) feeds a sky-brightness factor alongside **per-site Bortle**;
+  transparency, jet-stream seeing, aerosol/smoke, and snow-albedo are added.
+- **Bortle** is auto-derived from the site's lat/lon (light-pollution lookup), with
+  an optional per-site `bortle` config override.
+- **FITS auto-grader:** an offline tool grades each captured session's frames
+  (star-count / background, normalized within target + filter) against that night's
+  forecast, accumulating a labeled calibration dataset over time — the ground truth
+  where forecasts miss thin/uniform cloud. Gradual star-count decline reads as
+  cloud or dawn; a sudden cliff reads as a mechanical/obstruction artifact.
+- **Future:** a local API endpoint to feed a live Sky Quality Meter reading
+  directly into the sky-brightness score.
+
+The full design spec lives in the gitignored internal `docs/superpowers/` tree.
 
 ## Notification model
 

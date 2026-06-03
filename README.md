@@ -5,9 +5,13 @@ for up to three imaging sites tonight (and the next two nights), with verdicts
 for broadband and narrowband imaging modes.
 
 Data combines [Astrospheric](https://www.astrospheric.com/) (atmospheric
-transparency and seeing — Pro subscription required) with
+transparency and seeing — Pro subscription, **optional**, North America only),
 [Open-Meteo](https://open-meteo.com/) (multi-model cloud cover, precipitation
-probability, wind gusts — free, no key).
+probability, wind gusts — free, no key), and [7Timer!](https://www.7timer.info/)
+(free seeing/transparency for sites Astrospheric doesn't cover). Astrospheric is
+used automatically where it's available and a key is supplied; everywhere else the
+widget runs entirely on the free sources — see
+[Data sources & graceful fallback](#data-sources--graceful-fallback).
 
 ## Status
 
@@ -39,7 +43,9 @@ KDE Plasma 6 and may work on other Plasma 6 distributions without modification.
 - KDE Plasma 6 (Wayland or X11)
 - Python 3.12 or later
 - Dart SDK 3.11 or later (for building the scoring binary)
-- An [Astrospheric Pro](https://www.astrospheric.com/account) account and API key
+- *(Optional)* An [Astrospheric Pro](https://www.astrospheric.com/account) account
+  and API key — adds a North-America-only transparency/seeing feed. Without it, the
+  widget uses the free 7Timer + Open-Meteo sources automatically.
 - `requests` (`pip install requests`)
 - `notify-send` (provided by libnotify on most distributions)
 
@@ -64,7 +70,7 @@ systemctl --user enable --now astrowidget-fetch.timer
 mkdir -p ~/.config/astrowidget
 cp config.example.toml ~/.config/astrowidget/config.toml
 chmod 600 ~/.config/astrowidget/config.toml
-# Edit the file — add your Astrospheric API key and your sites.
+# Edit the file — add your sites (and, optionally, an Astrospheric Pro key).
 
 # Run the fetcher once to populate state.json.
 ~/Claude/astrowidget/fetcher/astrowidget_fetch.py
@@ -86,13 +92,39 @@ window itself.
 
 See `config.example.toml` for the full template. Minimum to get running:
 
-1. Set `astrospheric_key` to your Pro API key.
-2. Add one or more `[[sites]]` blocks with real lat/lon and a timezone.
+1. Add one or more `[[sites]]` blocks with real lat/lon and a timezone.
+2. *(Optional)* Set `astrospheric_key` to your Pro API key — adds the
+   North-America transparency/seeing feed. Blank = run entirely on free sources.
 3. (Optional) Tune per-site thresholds in `[thresholds.<site_id>]` blocks.
 4. (Optional) Adjust `[notifications]` to your taste.
 
 The config file must be `chmod 600`; the fetcher refuses to read world-readable
 configs to prevent accidental key disclosure.
+
+## Data sources & graceful fallback
+
+The widget pulls from up to three forecast sources and degrades gracefully when
+any is unavailable:
+
+| Source | Cost | Coverage | Provides |
+|---|---|---|---|
+| **Open-Meteo** | Free | Global | Multi-model cloud, precip, wind/gusts, visibility, temp/dewpoint |
+| **7Timer!** | Free | Global | Seeing & transparency (NCEP GFS-derived) |
+| **Astrospheric** | Pro key | North America | Higher-quality transparency, seeing, RDPS cloud |
+
+**Astrospheric eligibility is automatic, derived from each site's lat/lon** — there
+is no per-site flag. A site inside Astrospheric's North-America coverage uses it
+*if you've supplied a key*; every other site (and every site, if you supply no key)
+runs on the free 7Timer + Open-Meteo path. The widget never hard-fails for want of
+a key.
+
+When an in-coverage site's Astrospheric fetch fails — no key, a rejected key, or an
+outage — the site **transparently falls back to the free sources** and shows a
+small, dismissable red notice under its astro-dark line, e.g. *"Astrospheric data
+failed (HTTP 403) — using Open-Meteo data."*, with a **"Don't show this again"**
+button that suppresses that specific site + failure reason (a *different* failure
+at the same site will still surface). Sites outside coverage fall back silently —
+there was never anything to warn about.
 
 ## Notification rules
 

@@ -80,13 +80,86 @@ chmod 600 ~/.config/astrowidget/config.toml
 
 A combined `install.sh` runs all of the above.
 
-## Windows & macOS
+## Desktop widgets per platform
 
-The KDE plasmoid is Linux-only, but the fetcher, the scoring engine, and a
-cross-platform **Qt 6 desktop window** run on Windows and macOS too. See
-**[WINDOWS.md](WINDOWS.md)** for the Windows setup (Task Scheduler scheduling,
-toast notifications, and the desktop app), and `desktop/README.md` for the
-window itself.
+The fetcher and the scoring engine are cross-platform; what differs per OS is the
+*widget* that paints `state.json` on your desktop. They all read the **same**
+`state.json` the fetcher writes to your OS cache directory, so setup is always:
+**(1)** get the fetcher producing `state.json` on a schedule, then **(2)** install
+the widget for your platform.
+
+| Platform | Widget | Tech | Folder | `state.json` location |
+|----------|--------|------|--------|-----------------------|
+| Linux / KDE | Plasma plasmoid | QML | `plasmoid/` | `~/.cache/astrowidget/` |
+| Any | Standalone window | Qt 6 / PySide6 | `desktop/` | (same as the OS) |
+| Windows | Rainmeter skin | Rainmeter + Lua | `rainmeter/` | `%LOCALAPPDATA%\cache\astrowidget\` |
+| macOS | Übersicht widget | HTML/CSS/JS | `ubersicht/` | `~/Library/Caches/astrowidget/` |
+
+The Linux plasmoid is covered under [Installation](#installation); the Qt 6 window
+is in `desktop/README.md`. The two desktop-overlay widgets:
+
+### Windows — Rainmeter skin
+
+**Dependencies**
+- **Rainmeter** ≥ 4.5 — `winget install -e --id Rainmeter.Rainmeter` (or
+  [rainmeter.net](https://www.rainmeter.net)). The skin uses Rainmeter's built-in
+  Lua to parse the JSON — **no plugins to install**.
+- **Python 3.12+** + the `astrowidget-score.exe` scoring binary, to run the
+  fetcher. See **[WINDOWS.md](WINDOWS.md)** to set those up.
+- The fetcher must run on a schedule (Task Scheduler) so `state.json` stays fresh.
+
+**Install**
+1. Copy the `rainmeter\AstroWidget\` folder into `Documents\Rainmeter\Skins\`.
+2. Schedule the fetcher — run it once manually first so `state.json` exists, then
+   (every 6 hours; `pythonw.exe` avoids a console flash):
+   ```
+   schtasks /Create /TN "astrowidget" /TR "\"C:\Path\to\pythonw.exe\" \"C:\Path\to\astrowidget\fetcher\astrowidget_fetch.py\"" /SC HOURLY /MO 6 /F
+   ```
+3. Right-click the Rainmeter tray icon → **Manage** → select
+   `AstroWidget\AstroWidget.ini` → **Load**. Drag to position; lock via the skin's
+   right-click menu.
+
+The skin auto-reads `%LOCALAPPDATA%\cache\astrowidget\state.json` (where the
+fetcher writes). If you relocated the cache, set `STATEFILE` to an absolute path in
+the skin's `[Variables]`. The Lua parser has an offline test:
+`cd rainmeter\AstroWidget\@Resources\Scripts && lua test_state.lua`.
+
+### macOS — Übersicht widget
+
+**Dependencies**
+- **Übersicht** — `brew install --cask ubersicht` (or
+  [tracesof.net/uebersicht](https://tracesof.net/uebersicht/)). macOS 12+. The
+  widget is plain JS/CSS — Übersicht bundles its own renderer, so **no Node/npm
+  and no build step**.
+- **Python 3.12+** + the `astrowidget-score` scoring binary, to run the fetcher.
+- The fetcher must run on a schedule (launchd) so `state.json` stays fresh.
+
+**Install**
+1. Copy `ubersicht/astrowidget.widget/` into
+   `~/Library/Application Support/Übersicht/widgets/`. It appears on the desktop
+   immediately (use the menu-bar icon → **Refresh All Widgets** if not).
+2. Schedule the fetcher with a LaunchAgent. Create
+   `~/Library/LaunchAgents/space.dustin.astrowidget.plist` (use **absolute** paths
+   — launchd does not load your shell profile or a venv's `python3`):
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0"><dict>
+     <key>Label</key><string>space.dustin.astrowidget</string>
+     <key>ProgramArguments</key>
+     <array>
+       <string>/usr/bin/python3</string>
+       <string>/Users/USERNAME/path/to/astrowidget/fetcher/astrowidget_fetch.py</string>
+     </array>
+     <key>StartInterval</key><integer>21600</integer>  <!-- every 6h -->
+     <key>RunAtLoad</key><true/>
+   </dict></plist>
+   ```
+   Load it: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/space.dustin.astrowidget.plist`
+
+The widget reads `~/Library/Caches/astrowidget/state.json` (where the fetcher
+writes). Both widgets degrade gracefully if the file is missing or mid-write — they
+show a "waiting" placeholder and self-heal on the next refresh.
 
 ## Configuration
 
@@ -147,6 +220,8 @@ astrowidget/
 ├── bin/                                  # Compiled Dart scoring binary (gitignored)
 ├── plasmoid/space.dustin.astrowidget/    # QML plasmoid package (Linux / Plasma)
 ├── desktop/                              # Cross-platform Qt 6 desktop app (Win/macOS/Linux)
+├── rainmeter/AstroWidget/                # Rainmeter skin + Lua JSON parser (Windows)
+├── ubersicht/astrowidget.widget/         # Übersicht widget (macOS desktop overlay)
 ├── systemd/                              # User-level systemd unit files (Linux)
 ├── windows/                              # Windows installer + Task Scheduler script
 ├── tests/                                # pytest suite
@@ -199,7 +274,9 @@ dependency on astroplan. See `scoring/VENDORED.md`.
 - Scoring engine vendored from the author's
   [astroplan](https://github.com/dustinspace217/astroplan) project (same author,
   GPL-compatible).
-- KDE Plasma 6 — the platform this widget targets.
+- KDE Plasma 6, Rainmeter, and Übersicht — the desktop-widget hosts.
+- The Rainmeter skin bundles [`rxi/json.lua`](https://github.com/rxi/json.lua)
+  (MIT) to parse `state.json`, since Rainmeter's Lua has no JSON library.
 
 ## Contributing
 

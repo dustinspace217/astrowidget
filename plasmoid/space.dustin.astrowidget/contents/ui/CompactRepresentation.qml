@@ -23,6 +23,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import org.kde.plasma.plasmoid
+import org.kde.plasma.core as PlasmaCore
 import org.kde.kirigami as Kirigami
 
 MouseArea {
@@ -40,6 +41,20 @@ MouseArea {
 	// panel thickness. Each "cell" is ~24 px wide for icon + label.
 	implicitWidth: row.implicitWidth + Kirigami.Units.smallSpacing * 2
 	implicitHeight: row.implicitHeight + Kirigami.Units.smallSpacing
+
+	// Reserve our content's full extent on the panel's LONG axis. Without this, a
+	// horizontal panel hands the applet a square, icon-sized slot — and because the
+	// row is anchored centre, the wider dot-row overflows BOTH sides of that slot
+	// and spills over the neighbouring widget (the clock). Setting the minimum on
+	// the long axis (width in a horizontal panel, height in a vertical one) forces
+	// the shell to reserve the space so neighbours lay out beside us. `implicitWidth`
+	// alone is treated as a square hint here; the explicit Layout minimum is what
+	// the panel honours. Idiom verified against the stock desktopcontainment +
+	// systemmonitor compact representations.
+	Layout.minimumWidth: Plasmoid.formFactor === PlasmaCore.Types.Horizontal
+		? implicitWidth : Kirigami.Units.iconSizes.small
+	Layout.minimumHeight: Plasmoid.formFactor === PlasmaCore.Types.Vertical
+		? implicitHeight : Kirigami.Units.iconSizes.small
 
 	// Click handler: toggle the full popup via the passed-in PlasmoidItem.
 	// `plasmoidItem.expanded` is the Plasma 6 idiom (the Plasma 5 bare

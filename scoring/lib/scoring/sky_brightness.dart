@@ -232,19 +232,36 @@ const double _defaultZenithSb = 20.5;
 /// survive a missing Bortle.
 ///
 /// Receives: [bortle] (1-9, nullable), [moonIlluminationPercent] 0-100,
-/// [moonAltitudeDeg] degrees.
+/// [moonAltitudeDeg] degrees, [snowDepthM] ground snow depth in metres (Phase 1b).
 /// Returns: score 0-100.
 int locationSkyBrightnessScore({
 	int? bortle,
 	required double moonIlluminationPercent,
 	required double moonAltitudeDeg,
+	double snowDepthM = 0.0,
 }) {
 	const moonMaxDeltaMag = 3.0;
+	const pristineSb = 21.85;   // Bortle-1 zenith — the darkest possible baseline
+	const snowGain = 0.3;       // fresh snow (albedo ~0.8) reflects ~30% EXTRA of the
+	                            // moon+LP brightening back up. Directional default,
+	                            // re-tune from the auto-grader (spec §5/§10).
 	final baseSb = zenithSkyBrightness(bortle) ?? _defaultZenithSb;
 	final burden = moonBurden(
 		illuminationPercent: moonIlluminationPercent,
 		moonAltitudeDeg: moonAltitudeDeg,
 	);
-	final effectiveSb = baseSb - burden * moonMaxDeltaMag; // brighter sky = lower mag
+	final moonDelta = burden * moonMaxDeltaMag;
+	// Snow albedo (Phase 1b, spec §5): snow on the ground reflects BOTH moonlight
+	// and the site's light pollution back into the sky, amplifying the total
+	// brightening. lpExcess = how much brighter than a pristine sky the baseline
+	// already is (= the LP baked into baseSb), so the effect is Bortle-GATED — a
+	// dark site has almost no LP to reflect — and moon-gated. A snowless, dark, or
+	// moonless night is barely touched. Broadband-leaning: it rides the
+	// sky-brightness factor, which narrowband already discounts ~×0.08. snowDepthM
+	// > 1 cm counts as meaningful ground cover (dustings don't brighten the sky).
+	final lpExcess = (pristineSb - baseSb).clamp(0.0, 5.0);
+	final snowAmp = snowDepthM > 0.01 ? snowGain : 0.0;
+	final snowExtra = snowAmp * (moonDelta + lpExcess);
+	final effectiveSb = baseSb - moonDelta - snowExtra; // brighter sky = lower mag
 	return skyBrightnessScore(effectiveSb);
 }

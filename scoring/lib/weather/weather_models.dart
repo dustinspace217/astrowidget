@@ -68,6 +68,12 @@ class HourlyWeather {
 	/// a dead-calm jet = falsely excellent seeing. NEVER default this to 0.0.
 	final double? windSpeed250hPa;
 
+	/// Ground snow depth in metres (Phase 1b, spec §5). Snow reflects moonlight +
+	/// light pollution back into the sky (albedo ~0.8), a broadband sky-brightness
+	/// modifier. Non-nullable with a 0.0 default: 0 = no snow is a real, neutral
+	/// value (unlike the jet wind, snow has no null-vs-zero ambiguity).
+	final double snowDepth;
+
 	/// Creates an [HourlyWeather] with all fields.
 	const HourlyWeather({
 		required this.time,
@@ -84,6 +90,7 @@ class HourlyWeather {
 		required this.precipitation,
 		required this.visibility,
 		this.windSpeed250hPa, // nullable, NOT required — old cache/test JSON omits it
+		this.snowDepth = 0.0, // metres of ground snow; 0 = none (Phase 1b)
 	});
 
 	/// Deserializes from a JSON map (one hour's worth of data).
@@ -128,6 +135,8 @@ class HourlyWeather {
 			// NO `?? 0.0`: null = "no jet data" (the seeing blend skips it); 0.0
 			// would read as a dead-calm jet = falsely excellent seeing. (Phase 1.)
 			windSpeed250hPa: (json['wind_speed_250hPa'] as num?)?.toDouble(),
+			// `?? 0.0` is correct here (unlike the jet wind): absent snow = no snow.
+			snowDepth: (json['snow_depth'] as num?)?.toDouble() ?? 0.0,
 		);
 	}
 
@@ -150,6 +159,7 @@ class HourlyWeather {
 		'precipitation': precipitation,
 		'visibility': visibility,
 		'wind_speed_250hPa': windSpeed250hPa,
+		'snow_depth': snowDepth,
 	};
 }
 

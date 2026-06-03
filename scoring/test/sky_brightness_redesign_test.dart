@@ -99,4 +99,43 @@ void main() {
       expect(dflt, greaterThanOrEqualTo(b5));
     });
   });
+
+  group('snow albedo modifier (Phase 1b)', () {
+    // Inputs chosen so the effective sky brightness stays ABOVE the 17.0 floor,
+    // so the snow penalty is measurable (a full high moon at a bright site already
+    // floors the score to 0, leaving no room to show snow's effect).
+    test('ground snow darkens the score at a bright, moonlit site (reflects moon + LP)',
+        () {
+      final noSnow = locationSkyBrightnessScore(
+          bortle: 5, moonIlluminationPercent: 70, moonAltitudeDeg: 40, snowDepthM: 0.0);
+      final snow = locationSkyBrightnessScore(
+          bortle: 5, moonIlluminationPercent: 70, moonAltitudeDeg: 40, snowDepthM: 0.15);
+      expect(snow, lessThan(noSnow));
+    });
+
+    test('a <1cm dusting does NOT trigger the penalty (needs real ground cover)', () {
+      final dusting = locationSkyBrightnessScore(
+          bortle: 5, moonIlluminationPercent: 70, moonAltitudeDeg: 40, snowDepthM: 0.005);
+      final none = locationSkyBrightnessScore(
+          bortle: 5, moonIlluminationPercent: 70, moonAltitudeDeg: 40, snowDepthM: 0.0);
+      expect(dusting, none);
+    });
+
+    test('snow barely affects a dark, moonless site (nothing to reflect — Bortle-gated)',
+        () {
+      final noSnow = locationSkyBrightnessScore(
+          bortle: 2, moonIlluminationPercent: 0, moonAltitudeDeg: -90, snowDepthM: 0.0);
+      final snow = locationSkyBrightnessScore(
+          bortle: 2, moonIlluminationPercent: 0, moonAltitudeDeg: -90, snowDepthM: 0.30);
+      expect((noSnow - snow).abs(), lessThanOrEqualTo(3)); // negligible
+    });
+
+    test('default snowDepthM is 0 (no effect when omitted)', () {
+      final omitted = locationSkyBrightnessScore(
+          bortle: 5, moonIlluminationPercent: 80, moonAltitudeDeg: 45);
+      final explicitZero = locationSkyBrightnessScore(
+          bortle: 5, moonIlluminationPercent: 80, moonAltitudeDeg: 45, snowDepthM: 0.0);
+      expect(omitted, explicitZero);
+    });
+  });
 }

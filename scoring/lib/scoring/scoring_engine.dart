@@ -1234,16 +1234,22 @@ LocationScore scoreLocation({
 		stabilityFactor = surfaceStability;      // no jet → surface proxy
 	}
 
-	// ── Sky-brightness factor (Bortle baseline + geometry-aware moon) ──
+	// ── Sky-brightness factor (Bortle baseline + geometry-aware moon + snow) ──
 	// Replaces the old illumination-only moon term AND the removed darkness factor.
 	// ALWAYS present: locationSkyBrightnessScore never returns null (default
 	// baseline on null Bortle, fix 1), so the moon penalty applies at every site —
 	// including Bainbridge, which has no Bortle. A null moonAltitude yields burden
 	// 0 (no penalty); the wrapper supplies the real altitude in production.
+	// Phase 1b: the window's mean ground-snow depth feeds the snow-albedo modifier
+	// (snow reflects moon + LP upward; Bortle-gated, broadband-leaning).
+	final meanSnowDepth = windowHrs.isEmpty
+		? 0.0
+		: windowHrs.map((h) => h.snowDepth).reduce((a, b) => a + b) / windowHrs.length;
 	final skyBrightnessFactor = locationSkyBrightnessScore(
 		bortle: siteBortle,
 		moonIlluminationPercent: moonIlluminationPercent,
 		moonAltitudeDeg: moonAltitude ?? 0.0,
+		snowDepthM: meanSnowDepth,
 	);
 
 	// ── Transparency (AOD) factor — present ONLY when air-quality data exists ──

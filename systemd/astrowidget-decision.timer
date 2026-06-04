@@ -1,0 +1,19 @@
+[Unit]
+Description=astrowidget nightly decision prompt (~11 PM local)
+Documentation=https://github.com/dustinspace217/astrowidget
+
+[Timer]
+# Fire at 11 PM LOCAL time (no UTC suffix = local). By 11 PM the night's decision
+# is made — you've seen the forecast and either set up or not.
+OnCalendar=*-*-* 23:00:00
+
+# Persistent=true is load-bearing for the "respond later" guarantee: if the
+# machine was off/asleep at 11 PM, the timer fires on next login instead, and the
+# form surfaces that still-pending night in its dropdown. A missed night is never
+# silently lost.
+Persistent=true
+
+Unit=astrowidget-decision.service
+
+[Install]
+WantedBy=timers.target

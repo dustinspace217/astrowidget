@@ -29,7 +29,7 @@ for the sites we actually label.
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -150,8 +150,7 @@ def _iso_to_local(iso: str | None) -> datetime | None:
 	except ValueError:
 		return None
 	if dt.tzinfo is None:
-		from datetime import timezone as _tz
-		dt = dt.replace(tzinfo=_tz.utc)
+		dt = dt.replace(tzinfo=timezone.utc)
 	return dt.astimezone()  # machine local
 
 
@@ -235,3 +234,79 @@ def log_run(scoring_output: dict[str, Any], fetched_at: datetime) -> int:
 	finally:
 		conn.close()
 	return rows
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Decision-form support (Phase 3 Part 2). These take an open connection (the form
+# opens one for its lifetime) and are unit-tested separately from the GUI, which is
+# a thin PySide6 shell over them.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Column order returned by latest_forecast(), so callers can read by name.
+_FORECAST_KEYS = (
+	"recommendation", "bb_score", "nb_score", "cloud", "transparency",
+	"moon_illum", "best_window_start", "best_window_end",
+)
+
+
+def latest_forecast(conn: sqlite3.Connection, night_date: str, site_id: str,
+					night_label: str = "Tonight") -> dict[str, Any] | None:
+	"""The most-recently-fetched forecast row for (night_date, site, label), so the
+	form can show tonight's verdict as context. Returns a dict keyed by
+	_FORECAST_KEYS, or None if nothing's been logged for that night yet."""
+	row = conn.execute(
+		"""SELECT recommendation, bb_score, nb_score, cloud, transparency,
+				  moon_illum, best_window_start, best_window_end
+		   FROM forecasts
+		   WHERE night_date = ? AND site_id = ? AND night_label = ?
+		   ORDER BY fetched_at DESC LIMIT 1""",
+		(night_date, site_id, night_label),
+	).fetchone()
+	return dict(zip(_FORECAST_KEYS, row)) if row else None
+
+
+def upsert_decision(conn: sqlite3.Connection, night_date: str, site_id: str,
+					imaged: bool | None, reason: str = "", notes: str = "") -> None:
+	"""Insert or update the user's decision for a night+site (one per night+site via
+	the UNIQUE constraint). imaged: True/False, or None = pending (asked, not yet
+	answered). Re-saving overwrites — answering a previously-pending night works."""
+	imaged_val = None if imaged is None else (1 if imaged else 0)
+	conn.execute(
+		"""INSERT INTO decisions (recorded_at, night_date, site_id, imaged, reason, notes)
+		   VALUES (?,?,?,?,?,?)
+		   ON CONFLICT(night_date, site_id) DO UPDATE SET
+			 recorded_at = excluded.recorded_at, imaged = excluded.imaged,
+			 reason = excluded.reason, notes = excluded.notes""",
+		(datetime.now(timezone.utc).isoformat(), night_date, site_id,
+		 imaged_val, reason, notes),
+	)
+	conn.commit()
+
+
+def ensure_pending(conn: sqlite3.Connection, night_date: str, site_id: str) -> None:
+	"""Create a PENDING (imaged=NULL) decision row for a night+site if none exists,
+	so a form closed without answering still leaves a re-promptable record — the
+	'respond later' guarantee. No-op if a row (pending OR answered) already exists."""
+	conn.execute(
+		"""INSERT OR IGNORE INTO decisions (recorded_at, night_date, site_id, imaged)
+		   VALUES (?,?,?,NULL)""",
+		(datetime.now(timezone.utc).isoformat(), night_date, site_id),
+	)
+	conn.commit()
+
+
+def pending_nights(conn: sqlite3.Connection, site_id: str, limit: int = 14) -> list[str]:
+	"""Recent observing-night dates for a site that have a forecast logged but no
+	ANSWERED decision yet (imaged IS NULL, whether that's a pending row or no row at
+	all). These are the nights the form should still let the user answer. Newest
+	first, capped at `limit` nights so an away stretch doesn't surface forever."""
+	rows = conn.execute(
+		"""SELECT DISTINCT f.night_date
+		   FROM forecasts f
+		   LEFT JOIN decisions d
+			 ON d.night_date = f.night_date AND d.site_id = f.site_id
+		   WHERE f.site_id = ? AND f.night_label = 'Tonight' AND d.imaged IS NULL
+		   ORDER BY f.night_date DESC LIMIT ?""",
+		(site_id, limit),
+	).fetchall()
+	return [r[0] for r in rows]

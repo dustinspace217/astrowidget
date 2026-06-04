@@ -1,0 +1,20 @@
+[Unit]
+Description=astrowidget nightly decision form (Phase 3 calibration capture)
+Documentation=https://github.com/dustinspace217/astrowidget
+# Needs the graphical session — it opens a window. A user-manager that imported
+# the session env (DISPLAY / WAYLAND_DISPLAY) on graphical login can launch it.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+# NOT oneshot: the window persists until you answer (or close it), so the process
+# stays alive through your event loop. Default Type=simple.
+Type=simple
+# Logs tonight's image/no-image decision (Bainbridge) to the calibration DB. Pass
+# a different --site for another HOME site, or run additional instances.
+ExecStart=/usr/bin/python3 %h/Claude/astrowidget/forms/nightly_decision.py --site Bainbridge
+StandardOutput=journal
+StandardError=journal
+# If the display env isn't present in the user manager, the form can't open;
+# import it once per session with:
+#   systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY

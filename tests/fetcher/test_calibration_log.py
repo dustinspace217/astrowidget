@@ -132,3 +132,74 @@ def test_connect_is_idempotent(tmp_path, monkeypatch):
 		"SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
 	conn.close()
 	assert {"forecasts", "decisions", "fits_grades"} <= tables
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Decision-form support (Part 2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_upsert_decision_inserts_then_overwrites(tmp_path, monkeypatch):
+	monkeypatch.setattr(cl, "DB_PATH", tmp_path / "astrowidget.db")
+	conn = cl.connect()
+	cl.upsert_decision(conn, "2026-06-03", "bainbridge", imaged=False, reason="cloudy")
+	cl.upsert_decision(conn, "2026-06-03", "bainbridge", imaged=True, reason="cleared up")
+	rows = conn.execute(
+		"SELECT imaged, reason FROM decisions WHERE night_date='2026-06-03'").fetchall()
+	conn.close()
+	assert rows == [(1, "cleared up")]  # one row, overwritten
+
+
+def test_upsert_decision_stores_pending_null(tmp_path, monkeypatch):
+	monkeypatch.setattr(cl, "DB_PATH", tmp_path / "astrowidget.db")
+	conn = cl.connect()
+	cl.upsert_decision(conn, "2026-06-03", "bainbridge", imaged=None)
+	got = conn.execute(
+		"SELECT imaged FROM decisions WHERE night_date='2026-06-03'").fetchone()[0]
+	conn.close()
+	assert got is None
+
+
+def test_ensure_pending_is_noop_when_answered(tmp_path, monkeypatch):
+	monkeypatch.setattr(cl, "DB_PATH", tmp_path / "astrowidget.db")
+	conn = cl.connect()
+	cl.upsert_decision(conn, "2026-06-03", "bainbridge", imaged=True, reason="went out")
+	cl.ensure_pending(conn, "2026-06-03", "bainbridge")  # must NOT clobber the answer
+	got = conn.execute(
+		"SELECT imaged, reason FROM decisions WHERE night_date='2026-06-03'").fetchone()
+	conn.close()
+	assert got == (1, "went out")
+
+
+def test_latest_forecast_returns_most_recent(tmp_path, monkeypatch):
+	monkeypatch.setattr(cl, "DB_PATH", tmp_path / "astrowidget.db")
+	# Two fetches for the same night; latest_forecast must return the newer one.
+	out = dict(_SCORING_OUTPUT)
+	cl.log_run(_SCORING_OUTPUT, datetime(2026, 6, 4, 0, 0, tzinfo=timezone.utc))
+	# Second fetch: Tonight's recommendation improved to BB+NB.
+	out2 = {"sites": [{"id": "bainbridge", "status": "ok", "nights": [{
+		"label": "Tonight", "recommendation": "BB+NB",
+		"broadband": {"score": 80, "factors": {"cloud": 90}},
+		"narrowband": {"score": 88}, "moon": {}, "best_window": None,
+		"managed": False, "precip_peak_pct": 1,
+		"dark_window": {"start": "2026-06-04T07:00", "end": "2026-06-04T09:27"},
+	}]}]}
+	cl.log_run(out2, datetime(2026, 6, 4, 6, 0, tzinfo=timezone.utc))
+	conn = cl.connect()
+	nd = cl.observing_date(cl._iso_to_local("2026-06-04T07:00"))
+	fc = cl.latest_forecast(conn, nd, "bainbridge")
+	conn.close()
+	assert fc["recommendation"] == "BB+NB" and fc["bb_score"] == 80
+
+
+def test_pending_nights_lists_unanswered_only(tmp_path, monkeypatch):
+	monkeypatch.setattr(cl, "DB_PATH", tmp_path / "astrowidget.db")
+	cl.log_run(_SCORING_OUTPUT, datetime(2026, 6, 4, 0, 0, tzinfo=timezone.utc))
+	conn = cl.connect()
+	nd = cl.observing_date(cl._iso_to_local("2026-06-04T07:00"))
+	# Before answering, tonight is pending.
+	assert nd in cl.pending_nights(conn, "bainbridge")
+	# After answering, it drops off.
+	cl.upsert_decision(conn, nd, "bainbridge", imaged=True)
+	assert nd not in cl.pending_nights(conn, "bainbridge")
+	conn.close()

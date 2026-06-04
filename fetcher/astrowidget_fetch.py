@@ -42,6 +42,8 @@ from typing import Any
 
 import requests
 
+import calibration_log  # local module: the Phase-3 calibration database
+
 # Matches a trailing ISO-8601 timezone offset like "+00:00", "-0800", "+05:30".
 # Used to detect whether a timestamp already carries an offset before we
 # (wrongly) append one. A bare `"+" not in s` check misses NEGATIVE offsets.
@@ -2047,6 +2049,11 @@ def main() -> int:
 			"sites": scoring_sites,
 		}
 		scoring_output = invoke_scoring_binary(scoring_input)
+		# Phase 3: append this run's forecast + score to the calibration DB.
+		# Best-effort — log_run swallows its own errors, so it can never break a
+		# fetch. Builds the labeled dataset the nightly decision form + the FITS
+		# grader join to (by observing-night date + site).
+		calibration_log.log_run(scoring_output, now_utc)
 
 		# Merge scoring output back into site_results by id, and attach the
 		# per-night hourly slice the QML meteogram needs to render.

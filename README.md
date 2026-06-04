@@ -222,6 +222,8 @@ astrowidget/
 ├── desktop/                              # Cross-platform Qt 6 desktop app (Win/macOS/Linux)
 ├── rainmeter/AstroWidget/                # Rainmeter skin + Lua JSON parser (Windows)
 ├── ubersicht/astrowidget.widget/         # Übersicht widget (macOS desktop overlay)
+├── forms/                                # Nightly decision form (calibration capture)
+├── grader/                               # FITS auto-grader (calibration ground truth)
 ├── systemd/                              # User-level systemd unit files (Linux)
 ├── windows/                              # Windows installer + Task Scheduler script
 ├── tests/                                # pytest suite
@@ -255,6 +257,28 @@ state.json (atomic write)
     ▼
 QML plasmoid reads state.json (no network, no secrets)
 ```
+
+## Calibration & auto-grading (Phase 3, in progress)
+
+The scoring weights are physics-derived defaults. To re-tune them against real
+outcomes over time, astrowidget builds a labeled dataset in a local SQLite DB
+(`~/.local/share/astrowidget/astrowidget.db`):
+
+- **Forecast log** — the fetcher appends every run's verdict + factor scores
+  (`forecasts` table). Automatic.
+- **Nightly decision form** (`forms/nightly_decision.py`) — a small tkinter form
+  fired ~11 PM (`systemd/astrowidget-decision.{service,timer}`) that asks whether
+  you imaged your HOME site tonight and, if not, why. This captures the nights you
+  *skipped* — the survivorship-bias half the FITS can't show. Persistent: it
+  surfaces any night you haven't answered yet.
+- **FITS auto-grader** (`grader/`) — grades a session's subs by a star-count proxy
+  (transparency ground truth, normalized within target + filter) and classifies the
+  trend per the rule *gradual decline = cloud/dawn (dawn excluded by twilight),
+  sudden cliff = mechanical artifact (flagged, not fed to weather calibration)*.
+  Run: `python grader/grade.py <session-folder> --site Bainbridge --write`.
+
+The three join on observing-night date + site. Re-tuning the weights from the
+accumulated data is a later step (it needs weeks of paired records first).
 
 ## License
 

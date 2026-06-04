@@ -78,6 +78,9 @@ def read_sub(path: str, k: float = 5.0) -> dict[str, Any]:
 	Returns: a dict with:
 	    date_obs   — capture time (UTC ISO string from the header), or None
 	    filter     — filter name (header or filename), or None
+	    imagetyp   — frame type from the header (NINA: 'LIGHT'/'FLAT'/'DARK'/'BIAS'/
+	                 'DARKFLAT'), or None. The grader uses this to skip calibration
+	                 frames when a session folder co-locates them with lights.
 	    moonangl   — moon–target separation in degrees (header), or None
 	    exptime    — exposure seconds, or None
 	    median_bg  — median background level
@@ -94,9 +97,11 @@ def read_sub(path: str, k: float = 5.0) -> dict[str, Any]:
 
 	moonangl = header.get("MOONANGL")
 	exptime = header.get("EXPTIME")
+	imagetyp = header.get("IMAGETYP")
 	return {
 		"date_obs": header.get("DATE-OBS"),
 		"filter": _filter_from(header, path),
+		"imagetyp": imagetyp.strip() if isinstance(imagetyp, str) else None,
 		"moonangl": float(moonangl) if isinstance(moonangl, (int, float)) else None,
 		"exptime": float(exptime) if isinstance(exptime, (int, float)) else None,
 		"median_bg": median_background(data),

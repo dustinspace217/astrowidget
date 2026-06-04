@@ -1,0 +1,24 @@
+[Unit]
+Description=astrowidget FITS auto-grader schedule (each morning, after imaging ends)
+Documentation=https://github.com/dustinspace217/astrowidget
+
+[Timer]
+# Fire at 9 AM LOCAL (no UTC suffix = local). By 9 AM the night is over — even
+# near the summer solstice, Bainbridge astronomical dawn is ~3:30 AM and imaging
+# has long stopped — and the capture PC's overnight robocopy of last night's subs
+# to the NAS has settled. So "today's" folder is yesterday's completed session.
+OnCalendar=*-*-* 09:00:00
+
+# Persistent=true: a missed fire (machine off/asleep at 9 AM) runs on next login
+# instead of waiting a full day. The sweep is idempotent, so a late or duplicate
+# fire just re-confirms already-graded nights and grades any new ones.
+Persistent=true
+
+# The robocopy and the sweep are independent clocks; a small spread avoids running
+# the instant a copy might still be flushing.
+RandomizedDelaySec=300
+
+Unit=astrowidget-grade.service
+
+[Install]
+WantedBy=timers.target

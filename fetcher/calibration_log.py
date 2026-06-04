@@ -109,7 +109,10 @@ CREATE TABLE IF NOT EXISTS fits_grades (
     star_count_trend  REAL,          -- slope over the session (normalized within target+filter)
     bg_median         REAL,
     transition_class  TEXT,          -- 'stable' / 'gradual-cloud' / 'sudden-artifact' / 'dawn'
-    notes             TEXT
+    notes             TEXT,
+    -- One grade per night+site+target+filter, so re-grading a night (the daily
+    -- sweep, or a manual re-run) REPLACES rather than duplicates.
+    UNIQUE(night_date, site_id, target, filter)
 );
 CREATE INDEX IF NOT EXISTS ix_grades_night ON fits_grades(night_date, site_id);
 """

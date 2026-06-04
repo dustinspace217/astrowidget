@@ -1,0 +1,33 @@
+[Unit]
+Description=astrowidget FITS auto-grader (Phase 3 transparency ground truth)
+Documentation=https://github.com/dustinspace217/astrowidget
+Wants=network-online.target
+After=network-online.target
+# The sweep reads FITS off the NAS, so the CIFS mount must be up first. Naming the
+# full data path lets systemd resolve whichever mount actually covers it (the mount
+# point may be /mnt/vaultinspace or something deeper) and wait for it. If the NAS is
+# still unreachable, the grader fails loud: main() exits non-zero when the root isn't
+# a readable directory, so the unit shows failed rather than silently grading nothing.
+RequiresMountsFor=/mnt/vaultinspace/Astrophotography/Raws
+
+[Service]
+# Runs once per timer fire, then exits (like the fetcher). It walks last night's
+# session folders, grades the not-yet-graded ones, writes fits_grades, and stops.
+Type=oneshot
+# --scan: sweep the Raws/ tree and grade every complete, ungraded night within the
+# lookback window. Coordinates for dawn-exclusion are read from the gitignored
+# config.toml at runtime (so no lat/lon is baked into this unit). --since-days
+# defaults to 30; the first run after a long gap can backfill more with a manual
+#   python3 grader/grade.py --scan <root> --site Bainbridge --since-days 0 --write
+ExecStart=/usr/bin/python3 %h/Claude/astrowidget/grader/grade.py --scan /mnt/vaultinspace/Astrophotography/Raws --site Bainbridge --write
+StandardOutput=journal
+StandardError=journal
+# Reads one sub into memory at a time (read_sub returns scalar metrics, not the
+# pixel array), so peak is a single frame + numpy/astropy working set. 1 GB is
+# generous headroom even for a full-frame sensor; catches a runaway without
+# disturbing normal runs.
+MemoryMax=1G
+# A first-run backfill over CIFS can read a lot of subs. Cap at 30 min so a hung
+# network read can't wedge the timer indefinitely; if a genuine backfill needs
+# longer, run it manually once (it's idempotent — reruns skip graded nights).
+TimeoutStartSec=1800

@@ -275,7 +275,16 @@ outcomes over time, astrowidget builds a labeled dataset in a local SQLite DB
   (transparency ground truth, normalized within target + filter) and classifies the
   trend per the rule *gradual decline = cloud/dawn (dawn excluded by twilight),
   sudden cliff = mechanical artifact (flagged, not fed to weather calibration)*.
-  Run: `python grader/grade.py <session-folder> --site Bainbridge --write`.
+  - **Automatic (daily sweep):** a `systemd` timer
+    (`systemd/astrowidget-grade.{service,timer}`, ~9 AM local) runs
+    `grade.py --scan <Raws-root> --site Bainbridge --write`, which walks the
+    `Raws/<Target>/<Rig>/<date>/` tree and grades every complete, not-yet-graded
+    night. It **polls** rather than watching the folder: the raws live on a network
+    (CIFS) share written by the capture PC, and `inotify` does not fire for remote
+    writes — so a watcher would never trigger. Idempotent (already-graded nights are
+    skipped), bounded to the last 30 days by default (`--since-days 0` to backfill).
+  - **Manual (one session):**
+    `python grader/grade.py <session-folder> --site Bainbridge --write`.
 
 The three join on observing-night date + site. Re-tuning the weights from the
 accumulated data is a later step (it needs weeks of paired records first).

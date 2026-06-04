@@ -1,0 +1,17 @@
+[Unit]
+Description=Desktop notification when the astrowidget grader fails
+Documentation=https://github.com/dustinspace217/astrowidget
+# Fired by OnFailure= on astrowidget-grade.service, so a failed nightly sweep
+# (NAS down, an unhandled error, a non-zero exit) reaches you instead of sitting
+# unread in the journal. This is the visibility layer the QA pass asked for
+# (DEF-3b-03): the grader already exits non-zero + logs on failure; this pushes it.
+
+[Service]
+Type=oneshot
+# notify-send talks to the session notification daemon over D-Bus. A --user service
+# started by the user manager inherits DBUS_SESSION_BUS_ADDRESS + XDG_RUNTIME_DIR, so
+# this works without extra env on a normal graphical login. If a notification never
+# appears, import the session env once:
+#   systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY DISPLAY
+# -u critical keeps it in the notification history; -a sets the app name.
+ExecStart=/usr/bin/notify-send -u critical -a astrowidget "astrowidget grader failed" "The nightly FITS sweep failed. Check: journalctl --user -u astrowidget-grade -e"

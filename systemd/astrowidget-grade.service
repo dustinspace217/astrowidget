@@ -9,6 +9,9 @@ After=network-online.target
 # still unreachable, the grader fails loud: main() exits non-zero when the root isn't
 # a readable directory, so the unit shows failed rather than silently grading nothing.
 RequiresMountsFor=/mnt/vaultinspace/Astrophotography/Raws
+# On failure (non-zero exit: NAS unreadable, unhandled error), fire a desktop
+# notification so an unattended failure is visible, not just red in systemctl.
+OnFailure=astrowidget-grade-failure.service
 
 [Service]
 # Runs once per timer fire, then exits (like the fetcher). It walks last night's

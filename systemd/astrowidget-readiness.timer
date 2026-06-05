@@ -1,0 +1,15 @@
+[Unit]
+Description=astrowidget weekly calibration-readiness nudge
+Documentation=https://github.com/dustinspace217/astrowidget
+
+[Timer]
+# Weekly is plenty — the dataset grows ~one decision per night, so it crosses the
+# readiness threshold over weeks, not days. Sunday mid-morning.
+OnCalendar=Sun 10:00
+Persistent=true
+RandomizedDelaySec=600
+
+Unit=astrowidget-readiness.service
+
+[Install]
+WantedBy=timers.target

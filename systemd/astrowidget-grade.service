@@ -25,11 +25,11 @@ Type=oneshot
 ExecStart=/usr/bin/python3 %h/Claude/astrowidget/grader/grade.py --scan /mnt/vaultinspace/Astrophotography/Raws --site Bainbridge --write
 StandardOutput=journal
 StandardError=journal
-# Reads one sub into memory at a time (read_sub returns scalar metrics, not the
-# pixel array), so peak is a single frame + numpy/astropy working set. 1 GB is
-# generous headroom even for a full-frame sensor; catches a runaway without
-# disturbing normal runs.
-MemoryMax=1G
+# Reads one sub into memory at a time (read_sub returns scalar metrics, not the pixel
+# array). Steady-state nightly runs are light, but the one-time `--since-days 0`
+# backfill over many sessions peaked at ~1.2 GB and spilled to swap, so the cap is 2 GB
+# for headroom (still catches a runaway without disturbing the desktop).
+MemoryMax=2G
 # A first-run backfill over CIFS can read a lot of subs. Cap at 30 min so a hung
 # network read can't wedge the timer indefinitely; if a genuine backfill needs
 # longer, run it manually once (it's idempotent — reruns skip graded nights).

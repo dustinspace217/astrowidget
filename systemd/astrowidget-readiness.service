@@ -1,0 +1,14 @@
+[Unit]
+Description=astrowidget calibration-readiness check (Phase 3 Part 4 prep)
+Documentation=https://github.com/dustinspace217/astrowidget
+
+[Service]
+# Queries the calibration DB and, ONLY when there's enough joinable data (enough nights
+# across enough condition bands), fires a desktop notification telling you it's time to
+# ask for a re-tune. Silent every other week — no nag while the data is still thin.
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/Claude/astrowidget/grader/calibration_readiness.py --site Bainbridge --notify
+StandardOutput=journal
+StandardError=journal
+# A pure DB query — no NAS, no heavy compute.
+MemoryMax=128M

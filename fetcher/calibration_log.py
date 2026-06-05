@@ -286,6 +286,19 @@ def upsert_decision(conn: sqlite3.Connection, night_date: str, site_id: str,
 	conn.commit()
 
 
+def get_decision(conn: sqlite3.Connection, night_date: str,
+				 site_id: str) -> dict[str, Any] | None:
+	"""The recorded decision for a night+site as {imaged (0/1/None), reason, notes},
+	or None if no row exists. Lets the form PRE-FILL an existing answer when you reopen
+	a night, so re-editing edits it instead of silently overwriting with blank defaults
+	(which lost a note once)."""
+	row = conn.execute(
+		"SELECT imaged, reason, notes FROM decisions WHERE night_date = ? AND site_id = ?",
+		(night_date, site_id),
+	).fetchone()
+	return None if row is None else {"imaged": row[0], "reason": row[1], "notes": row[2]}
+
+
 def ensure_pending(conn: sqlite3.Connection, night_date: str, site_id: str) -> None:
 	"""Create a PENDING (imaged=NULL) decision row for a night+site if none exists,
 	so a form closed without answering still leaves a re-promptable record — the

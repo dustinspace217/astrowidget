@@ -216,3 +216,15 @@ def test_pending_nights_excludes_not_yet_occurred(tmp_path, monkeypatch):
 	assert cl.pending_nights(conn, "bainbridge", as_of="2000-01-01") == []
 	assert nd in cl.pending_nights(conn, "bainbridge", as_of=nd)
 	conn.close()
+
+
+def test_get_decision_roundtrips(tmp_path, monkeypatch):
+	# get_decision feeds the form's pre-fill: None when absent, the stored answer when set.
+	monkeypatch.setattr(cl, "DB_PATH", tmp_path / "astrowidget.db")
+	conn = cl.connect()
+	assert cl.get_decision(conn, "2026-06-04", "bainbridge") is None
+	cl.upsert_decision(conn, "2026-06-04", "bainbridge", imaged=False,
+					   reason="Precipitation (rain / snow)", notes="rainy")
+	assert cl.get_decision(conn, "2026-06-04", "bainbridge") == {
+		"imaged": 0, "reason": "Precipitation (rain / snow)", "notes": "rainy"}
+	conn.close()

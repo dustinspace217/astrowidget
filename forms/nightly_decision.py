@@ -82,7 +82,7 @@ class DecisionForm:
 		self.night_combo = ttk.Combobox(frm, textvariable=self.night_var,
 										state="readonly")
 		self.night_combo.grid(row=1, column=1, sticky="ew", pady=2)
-		self.night_combo.bind("<<ComboboxSelected>>", self._update_context)
+		self.night_combo.bind("<<ComboboxSelected>>", self._on_night_selected)
 
 		# Forecast context for the selected night (what we predicted), so the answer
 		# is informed and you can sanity-check the verdict against reality.
@@ -133,7 +133,7 @@ class DecisionForm:
 		nights = cl.pending_nights(self.conn, self.site_id) or [self._tonight]
 		self.night_combo["values"] = nights
 		self.night_var.set(select if select in nights else nights[0])
-		self._update_context()
+		self._on_night_selected()
 
 	def _update_context(self, *_) -> None:
 		"""Show the latest logged forecast for the selected night as context."""
@@ -148,6 +148,29 @@ class DecisionForm:
 				f"BB {fc['bb_score']} / NB {fc['nb_score']}  ·  {fc['cloud']}% cloud"))
 		else:
 			self.ctx.config(text="No forecast was logged for this night.")
+
+	def _on_night_selected(self, *_) -> None:
+		"""Night changed (dropdown pick or initial load): refresh BOTH the forecast
+		context line and the pre-filled answer for that night."""
+		self._update_context()
+		self._load_decision()
+
+	def _load_decision(self) -> None:
+		"""Pre-fill the answer widgets from any EXISTING decision for the selected night,
+		so reopening a night edits it rather than overwriting with blank defaults (which
+		silently dropped a note once). A pending (imaged NULL) or absent row → blanks."""
+		nd = self.night_var.get()
+		dec = cl.get_decision(self.conn, nd, self.site_id) if nd else None
+		if dec and dec["imaged"] is not None:        # an answered night → load it back
+			self.imaged_var.set(1 if dec["imaged"] else 0)
+			r = dec["reason"] or ""
+			self.reason_var.set(r if r in REASONS else REASONS[0])
+			self.notes_var.set(dec["notes"] or "")
+		else:                                         # pending / never answered → blanks
+			self.imaged_var.set(0)
+			self.reason_var.set(REASONS[0])
+			self.notes_var.set("")
+		self._update_reason_enabled()
 
 	def _update_reason_enabled(self, *_) -> None:
 		"""The reason preset only applies to a skip; disable it for an imaged night

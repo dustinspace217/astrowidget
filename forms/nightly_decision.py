@@ -37,6 +37,7 @@ import calibration_log as cl  # noqa: E402  (path insert must precede the import
 # map to the survivorship-bias categories the spec calls out.
 REASONS = [
 	"Cloudy / overcast",
+	"Precipitation (rain / snow)",
 	"Moon too bright",
 	"Wind / weather / dew",
 	"Equipment / setup issue",
@@ -114,9 +115,14 @@ class DecisionForm:
 		btns = ttk.Frame(frm)
 		btns.grid(row=7, column=0, columnspan=2, sticky="e", pady=(12, 0))
 		ttk.Button(btns, text="Later", command=self._on_close).grid(row=0, column=0, padx=4)
-		save = ttk.Button(btns, text="Save", command=self._save)
-		save.grid(row=0, column=1)
-		save.focus_set()
+		self._save_btn = ttk.Button(btns, text="Save", command=self._save)
+		self._save_btn.grid(row=0, column=1)
+		self._save_btn.focus_set()
+
+		# Confirmation line. On Save this shows "✓ Saved …" before the window auto-closes,
+		# so the submit is never silent (the old behaviour gave no feedback at all).
+		self.status = ttk.Label(frm, text="", foreground="#2a8a3a", font=("", 10, "bold"))
+		self.status.grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
 		self._update_reason_enabled()
 
@@ -157,14 +163,15 @@ class DecisionForm:
 		reason = "" if imaged else self.reason_var.get()
 		cl.upsert_decision(self.conn, nd, self.site_id, imaged, reason,
 						   self.notes_var.get().strip())
-		# Advance to the next still-pending night, or close when the queue is empty.
-		remaining = cl.pending_nights(self.conn, self.site_id)
-		if remaining:
-			self.notes_var.set("")
-			self.imaged_var.set(0)
-			self._reload_nights(select=remaining[0])
-		else:
-			self._on_close()
+		# Confirm visibly, then auto-close. Earlier this SILENTLY advanced through the
+		# pending-night queue — and because a fresh "tonight" forecast is always pending,
+		# the queue never emptied, so the window never closed and the submit read as
+		# broken. One night per open is clearer; an earlier night you still owe is
+		# re-surfaced by the dropdown the next time the form opens.
+		summary = "imaged" if imaged else f"skipped — {reason}"
+		self.status.config(text=f"✓  Saved {nd}:  {summary}")
+		self._save_btn.config(state="disabled")  # guard against a double-submit during the pause
+		self.root.after(1400, self._on_close)
 
 	def _on_close(self) -> None:
 		self.conn.close()

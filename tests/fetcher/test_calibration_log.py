@@ -203,3 +203,16 @@ def test_pending_nights_lists_unanswered_only(tmp_path, monkeypatch):
 	cl.upsert_decision(conn, nd, "bainbridge", imaged=True)
 	assert nd not in cl.pending_nights(conn, "bainbridge")
 	conn.close()
+
+
+def test_pending_nights_excludes_not_yet_occurred(tmp_path, monkeypatch):
+	# A fetch logs the UPCOMING night as 'Tonight', so just after midnight a night that
+	# hasn't started is already in forecasts. pending_nights must not surface it: with
+	# as_of strictly before the night, it's excluded; once as_of reaches it, it appears.
+	monkeypatch.setattr(cl, "DB_PATH", tmp_path / "astrowidget.db")
+	cl.log_run(_SCORING_OUTPUT, datetime(2026, 6, 4, 0, 0, tzinfo=timezone.utc))
+	conn = cl.connect()
+	nd = cl.observing_date(cl._iso_to_local("2026-06-04T07:00"))
+	assert cl.pending_nights(conn, "bainbridge", as_of="2000-01-01") == []
+	assert nd in cl.pending_nights(conn, "bainbridge", as_of=nd)
+	conn.close()

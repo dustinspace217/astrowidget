@@ -298,18 +298,27 @@ def ensure_pending(conn: sqlite3.Connection, night_date: str, site_id: str) -> N
 	conn.commit()
 
 
-def pending_nights(conn: sqlite3.Connection, site_id: str, limit: int = 14) -> list[str]:
-	"""Recent observing-night dates for a site that have a forecast logged but no
-	ANSWERED decision yet (imaged IS NULL, whether that's a pending row or no row at
-	all). These are the nights the form should still let the user answer. Newest
-	first, capped at `limit` nights so an away stretch doesn't surface forever."""
+def pending_nights(conn: sqlite3.Connection, site_id: str, limit: int = 14,
+				   as_of: str | None = None) -> list[str]:
+	"""Observing-night dates for a site that have a forecast logged but no ANSWERED
+	decision yet (imaged IS NULL, whether that's a pending row or no row at all) — the
+	nights the form should still let the user answer. Newest first, capped at `limit`
+	so an away stretch doesn't surface forever.
+
+	Excludes nights AFTER `as_of` (default: today's observing date). A fetch logs the
+	UPCOMING night as 'Tonight', so just after midnight a night that hasn't started is
+	already in `forecasts`; prompting "did you image <a night not yet begun>?" is wrong,
+	so only nights that have actually occurred are surfaced. `as_of` is a param (not a
+	hard-coded now()) so the decision helpers stay deterministically testable."""
+	as_of = as_of or observing_date(datetime.now().astimezone())
 	rows = conn.execute(
 		"""SELECT DISTINCT f.night_date
 		   FROM forecasts f
 		   LEFT JOIN decisions d
 			 ON d.night_date = f.night_date AND d.site_id = f.site_id
 		   WHERE f.site_id = ? AND f.night_label = 'Tonight' AND d.imaged IS NULL
+			 AND f.night_date <= ?
 		   ORDER BY f.night_date DESC LIMIT ?""",
-		(site_id, limit),
+		(site_id, as_of, limit),
 	).fetchall()
 	return [r[0] for r in rows]

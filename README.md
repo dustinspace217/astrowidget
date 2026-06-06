@@ -1,6 +1,6 @@
 # astrowidget
 
-A KDE Plasma 6 widget for astrophotographers. At-a-glance go/no-go conditions
+A Widget for astrophotographers. At-a-glance go/no-go conditions
 for up to three imaging sites tonight (and the next two nights), with verdicts
 for broadband and narrowband imaging modes.
 
@@ -40,7 +40,9 @@ KDE Plasma 6 and may work on other Plasma 6 distributions without modification.
 
 ## Requirements
 
-- KDE Plasma 6 (Wayland or X11)
+- KDE Plasma 6 (Wayland or X11) for Linux widget, Ubersicht for Mac,
+  Rainmeter for Windows.  There is also a platform-agnostic standalone
+  app.
 - Python 3.12 or later
 - Dart SDK 3.11 or later (for building the scoring binary)
 - *(Optional)* An [Astrospheric Pro](https://www.astrospheric.com/account) account

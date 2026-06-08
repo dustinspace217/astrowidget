@@ -300,7 +300,11 @@ def _session_dirs(raws_root: str):
 			# parts is (<Target>, <date>) at depth 2, (<Target>, <Rig>, <date>) at depth 3.
 			parts = d.relative_to(root).parts
 			target = parts[0] if len(parts) < 3 else f"{parts[0]} / {parts[1]}"
-			yield d, target, d.name
+			# The <Rig> component (when present) identifies the capture source, e.g.
+			# "Eon 70" (a home scope) vs "T26" (an iTelescope rental). grade_pending
+			# uses it to grade only a site's own rigs — Raws/ mixes home + remote.
+			rig = parts[1] if len(parts) >= 3 else None
+			yield d, target, rig, d.name
 
 
 def _graded_keys(conn, site_id: str) -> set[tuple[str, str]]:
@@ -339,11 +343,15 @@ def _site_coords(site_id: str, config_path: str | None = None):
 def grade_pending(
 	raws_root: str, site_id: str = "Bainbridge",
 	lat: float | None = None, lon: float | None = None, write: bool = True,
-	since_days: int = 30,
+	since_days: int = 30, rigs: set[str] | None = None,
 ) -> list[dict[str, Any]]:
 	"""Scan raws_root and grade every COMPLETE, not-yet-graded session folder.
 
 	The auto-grader's entry point (a systemd timer calls this each morning). Skips:
+	  - other rigs: when `rigs` is given, only sessions whose <Rig> folder is in the set
+	    are graded. Raws/ mixes the home scope with iTelescope rentals, and the site
+	    label would otherwise be stamped on remote data — so the home-site sweep passes
+	    its own rig(s) (e.g. {"Eon 70"}) and the T-number rentals are skipped.
 	  - tonight / future: a folder whose date is >= today's local date — imaging
 	    isn't done. (The timer runs mid-morning, after dawn, so "today's" folder is
 	    either tonight's not-yet-started session or still being written; either way
@@ -381,8 +389,12 @@ def grade_pending(
 	written: list[dict[str, Any]] = []
 	seen = 0
 	skipped_old = 0
-	for session_dir, target, dir_date in _session_dirs(raws_root):
+	skipped_rig = 0
+	for session_dir, target, rig, dir_date in _session_dirs(raws_root):
 		seen += 1
+		if rigs is not None and rig not in rigs:
+			skipped_rig += 1
+			continue  # not one of this site's rigs (e.g. an iTelescope remote scope)
 		if dir_date >= today:
 			continue  # tonight or later — imaging not complete
 		if cutoff and dir_date < cutoff:
@@ -407,6 +419,10 @@ def grade_pending(
 	# exits non-zero up front when the root isn't a readable directory at all).
 	sys.stderr.write(
 		f"grader: swept {seen} session dir(s) under {raws_root}; graded {len(written)}\n")
+	if skipped_rig:
+		sys.stderr.write(
+			f"grader: skipped {skipped_rig} session(s) from rigs not in {sorted(rigs)} "
+			f"(remote rentals etc.)\n")
 	if skipped_old:
 		# Surface the bound rather than hiding it — a future run can backfill with
 		# --since-days 0 if these older nights are wanted.
@@ -433,6 +449,10 @@ def main() -> int:
 	ap.add_argument("--since-days", type=int, default=30, metavar="N",
 					help="--scan only: grade nights within the last N days "
 						 "(default 30; 0 = backfill all history)")
+	ap.add_argument("--rig", action="append", metavar="RIG", default=None,
+					help="--scan only: grade only sessions from this rig folder "
+						 "(repeatable). Raws/ mixes home + remote scopes, so pass your "
+						 "home rig(s) (e.g. --rig 'Eon 70') to keep rentals out of this site.")
 	args = ap.parse_args()
 
 	# --scan: the daily sweep.
@@ -463,7 +483,8 @@ def main() -> int:
 				f"grader: no coordinates for site {args.site!r} — dawn-exclusion DISABLED; "
 				f"dawn-fade nights may misclassify as gradual-cloud.\n")
 		written = grade_pending(args.scan, args.site, lat, lon,
-								write=args.write, since_days=args.since_days)
+								write=args.write, since_days=args.since_days,
+								rigs=set(args.rig) if args.rig else None)
 		if not written:
 			print("Auto-grader: no new complete nights to grade.")
 			return 0

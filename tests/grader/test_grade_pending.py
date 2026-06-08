@@ -70,24 +70,24 @@ def test_session_dirs_depth3(tmp_path):
 	_make_session(tmp_path, "M81", "2026-05-31")
 	found = list(grade._session_dirs(str(tmp_path)))
 	assert len(found) == 1
-	_dir, target, date = found[0]
-	assert target == "M81 / Eon70" and date == "2026-05-31"
+	_dir, target, rig, date = found[0]
+	assert target == "M81 / Eon70" and rig == "Eon70" and date == "2026-05-31"
 
 
 def test_session_dirs_depth2(tmp_path):
-	# Missing <Rig> level (Raws/<Target>/<date>/) still resolves target + date.
+	# Missing <Rig> level (Raws/<Target>/<date>/) still resolves target + date; rig=None.
 	_make_session(tmp_path, "M31", "2026-05-30", rig=None)
 	found = list(grade._session_dirs(str(tmp_path)))
 	assert len(found) == 1
-	_dir, target, date = found[0]
-	assert target == "M31" and date == "2026-05-30"
+	_dir, target, rig, date = found[0]
+	assert target == "M31" and rig is None and date == "2026-05-30"
 
 
 def test_session_dirs_ignores_nondate_dirs(tmp_path):
 	# A non-date folder (e.g. a stray "LIGHT" or "Calibration" dir) is not a session.
 	(tmp_path / "M81" / "Eon70" / "Calibration").mkdir(parents=True)
 	(tmp_path / "M81" / "Eon70" / "2026-05-31").mkdir(parents=True)
-	dates = {date for _d, _t, date in grade._session_dirs(str(tmp_path))}
+	dates = {date for _d, _t, _r, date in grade._session_dirs(str(tmp_path))}
 	assert dates == {"2026-05-31"}
 
 
@@ -239,6 +239,16 @@ def test_two_rigs_same_target_do_not_overwrite(tmp_path, recorded):
 	finally:
 		conn.close()
 	assert n == 2  # both rigs persisted, neither overwritten
+
+
+def test_rigs_filter_grades_only_home_rig(tmp_path, recorded):
+	"""rigs={...} restricts the sweep to a site's own rigs, so iTelescope rentals in
+	the same Raws/ tree aren't graded under the home site (the real-world bug)."""
+	night = _offset(1)
+	_make_session(tmp_path, "M81", night, rig="Eon 70")   # home scope
+	_make_session(tmp_path, "Caldwell 5", night, rig="T26")  # iTelescope rental
+	grade.grade_pending(str(tmp_path), "Bainbridge", rigs={"Eon 70"})
+	assert set(recorded) == {(night, "M81 / Eon 70")}  # only the home rig graded
 
 
 # ---- resilience + boundaries ----------------------------------------------

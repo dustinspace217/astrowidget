@@ -1267,6 +1267,9 @@ def enrich_night_factors(
 	night["displayFactors"] = {
 		"seeing": {"raw": _round1(seeing_avg), "label": seeing_lbl(seeing_avg)},
 		"transparency": {"raw": _round1(transparency_avg), "label": trans_lbl(transparency_avg)},
+		# Which service the seeing/transparency RAW came from. The two use opposite
+		# numeric scales, so the calibration log stores this to interpret the number.
+		"source": st_source,
 		"cloudPct": _round0(avg("cloud_cover")),
 		"cloudLow": _round0(avg("cloud_cover_low")),
 		"cloudMid": _round0(avg("cloud_cover_mid")),
@@ -2049,11 +2052,6 @@ def main() -> int:
 			"sites": scoring_sites,
 		}
 		scoring_output = invoke_scoring_binary(scoring_input)
-		# Phase 3: append this run's forecast + score to the calibration DB.
-		# Best-effort — log_run swallows its own errors, so it can never break a
-		# fetch. Builds the labeled dataset the nightly decision form + the FITS
-		# grader join to (by observing-night date + site).
-		calibration_log.log_run(scoring_output, now_utc)
 
 		# Merge scoring output back into site_results by id, and attach the
 		# per-night hourly slice the QML meteogram needs to render.
@@ -2079,6 +2077,13 @@ def main() -> int:
 					st_source_by_id.get(sr["id"], "astrospheric"),
 				)
 			sr["nights"] = nights
+
+		# Phase 3: append this run's forecast to the calibration DB — AFTER the enrich
+		# loop above, so each night now carries displayFactors (the raw readings) and
+		# log_run captures them next to the scores. Best-effort: log_run swallows its own
+		# errors, so it can never break a fetch. Builds the labeled dataset the nightly
+		# decision form + the FITS grader join to (by observing-night date + site).
+		calibration_log.log_run(scoring_output, now_utc)
 
 	# Budget tracking — surface a notification once the user hits 80% of
 	# their daily Astrospheric quota so they have time to react.

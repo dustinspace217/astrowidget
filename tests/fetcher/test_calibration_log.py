@@ -123,8 +123,9 @@ def test_log_run_is_best_effort_on_garbage(tmp_path, monkeypatch):
 
 
 def test_connect_is_idempotent(tmp_path, monkeypatch):
-	"""Re-connecting re-runs the schema safely (IF NOT EXISTS) — also the forward
-	migration path."""
+	"""Re-connecting re-runs the schema + _migrate safely on an already-current DB (a
+	no-op). The ALTER branch on an OLD DB is covered by
+	test_migrate_adds_raw_columns_to_old_db."""
 	monkeypatch.setattr(cl, "DB_PATH", tmp_path / "astrowidget.db")
 	cl.connect().close()
 	conn = cl.connect()  # must not raise
@@ -132,6 +133,117 @@ def test_connect_is_idempotent(tmp_path, monkeypatch):
 		"SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
 	conn.close()
 	assert {"forecasts", "decisions", "fits_grades"} <= tables
+
+
+def test_log_run_stores_raw_readings(tmp_path, monkeypatch):
+	# A night enriched with displayFactors (what enrich_night_factors adds in the
+	# fetcher) → the raw forecast READINGS land in the row, next to the scores.
+	monkeypatch.setattr(cl, "DB_PATH", tmp_path / "astrowidget.db")
+	out = {"sites": [{"id": "bainbridge", "status": "ok", "nights": [{
+		"label": "Tonight", "recommendation": "BB+NB",
+		"broadband": {"score": 80, "factors": {"cloud": 90}},
+		"narrowband": {"score": 85}, "moon": {}, "best_window": None,
+		"managed": False, "precip_peak_pct": 7,  # distinct from precipPct (5) below, so
+		"dark_window": {"start": "2026-06-04T07:00", "end": "2026-06-04T09:27"},
+		"displayFactors": {
+			"seeing": {"raw": 2.5, "label": "Good"},
+			"transparency": {"raw": 21.5, "label": "Above Average"},
+			"source": "astrospheric",
+			"cloudPct": 12, "cloudLow": 3, "cloudMid": 5, "cloudHigh": 8,
+			"windKmh": 9, "gustsKmh": 14, "dewSpreadC": 4.2,
+			"precipPct": 5, "visibilityKm": 24.0,
+			"cloudConvergence": {"models": {}, "spread": 18},
+		},
+	}]}]}
+	cl.log_run(out, datetime(2026, 6, 4, 6, 0, tzinfo=timezone.utc))
+	conn = cl.connect()
+	row = conn.execute(
+		"SELECT seeing_raw, seeing_label, transparency_raw, transparency_label, "
+		"st_source, cloud_pct, cloud_low, cloud_mid, cloud_high, wind_kmh, gusts_kmh, "
+		"dew_spread_c, precip_pct, visibility_km, cloud_spread FROM forecasts").fetchone()
+	conn.close()
+	assert row == (2.5, "Good", 21.5, "Above Average", "astrospheric",
+				   12, 3, 5, 8, 9, 14, 4.2, 5, 24.0, 18)
+
+
+def test_log_run_handles_missing_displayfactors(tmp_path, monkeypatch):
+	# A night with NO displayFactors (no hourly slice) → raw columns NULL, no crash.
+	monkeypatch.setattr(cl, "DB_PATH", tmp_path / "astrowidget.db")
+	out = {"sites": [{"id": "b", "status": "ok", "nights": [{
+		"label": "Tonight", "recommendation": "Neither",
+		"broadband": {"score": 30}, "narrowband": {"score": 25}, "moon": {},
+		"dark_window": {"start": "2026-06-04T07:00", "end": "2026-06-04T09:00"},
+	}]}]}
+	n = cl.log_run(out, datetime(2026, 6, 4, 6, 0, tzinfo=timezone.utc))
+	conn = cl.connect()
+	sr = conn.execute("SELECT seeing_raw, cloud_pct FROM forecasts").fetchone()
+	conn.close()
+	assert n == 1 and sr == (None, None)
+
+
+def test_migrate_adds_raw_columns_to_old_db(tmp_path, monkeypatch):
+	# The riskiest new code: _migrate ALTERs an OLD forecasts table (no raw columns) to
+	# add them. Build the pre-raw shape, connect (runs _migrate), and prove the columns
+	# exist AND are writable (a reading round-trips), and that re-migrating is a no-op.
+	import sqlite3
+	monkeypatch.setattr(cl, "DB_PATH", tmp_path / "old.db")
+	old = sqlite3.connect(str(cl.DB_PATH))
+	# The PRE-raw forecasts schema (what a real old DB has): all original columns,
+	# none of the 15 raw-reading ones. _migrate must add exactly those 15.
+	old.execute("""CREATE TABLE forecasts (
+		id INTEGER PRIMARY KEY, fetched_at TEXT, night_date TEXT, night_label TEXT,
+		site_id TEXT, recommendation TEXT, bb_score INTEGER, bb_verdict TEXT,
+		nb_score INTEGER, nb_verdict TEXT, cloud INTEGER, stability INTEGER,
+		sky_brightness INTEGER, transparency INTEGER, moon_illum REAL, moon_alt REAL,
+		precip_peak_pct INTEGER, best_window_start TEXT, best_window_end TEXT,
+		managed INTEGER, dark_start TEXT, dark_end TEXT)""")
+	old.commit(); old.close()
+
+	conn = cl.connect()  # runs _migrate → ALTERs the raw columns in
+	cols = {r[1] for r in conn.execute("PRAGMA table_info(forecasts)")}
+	conn.close()
+	assert {name for name, _ in cl._FORECAST_RAW_COLUMNS} <= cols  # all 15 added
+
+	# The migrated columns are WRITABLE, not just named.
+	out = {"sites": [{"id": "b", "status": "ok", "nights": [{
+		"label": "Tonight", "recommendation": "Neither", "broadband": {"score": 30},
+		"narrowband": {"score": 25}, "moon": {},
+		"dark_window": {"start": "2026-06-04T07:00", "end": "2026-06-04T09:00"},
+		"displayFactors": {"seeing": {"raw": 3.0, "label": "Fair"},
+						   "transparency": {}, "source": "7timer", "cloudPct": 40,
+						   "cloudLow": None, "cloudMid": None, "cloudHigh": None,
+						   "windKmh": 5, "gustsKmh": None, "dewSpreadC": None,
+						   "precipPct": 10, "visibilityKm": None,
+						   "cloudConvergence": None},
+	}]}]}
+	cl.log_run(out, datetime(2026, 6, 4, 6, 0, tzinfo=timezone.utc))
+	conn2 = cl.connect()  # re-migrate must be a no-op (no duplicate-column error)
+	got = conn2.execute("SELECT seeing_raw, cloud_pct, st_source FROM forecasts").fetchone()
+	conn2.close()
+	assert got == (3.0, 40, "7timer")
+
+
+def test_log_run_handles_null_cloud_convergence(tmp_path, monkeypatch):
+	# Common production state (international sites / skipped convergence fetch):
+	# displayFactors present, cloudConvergence None → cloud_spread NULL, no crash on
+	# the `conv = df.get(...) or {}` guard.
+	monkeypatch.setattr(cl, "DB_PATH", tmp_path / "astrowidget.db")
+	out = {"sites": [{"id": "b", "status": "ok", "nights": [{
+		"label": "Tonight", "recommendation": "BB+NB", "broadband": {"score": 70},
+		"narrowband": {"score": 70}, "moon": {},
+		"dark_window": {"start": "2026-06-04T07:00", "end": "2026-06-04T09:00"},
+		"displayFactors": {"seeing": {"raw": 2.0, "label": "Good"},
+						   "transparency": {"raw": 21.0, "label": "Average"},
+						   "source": "astrospheric", "cloudPct": 10, "cloudLow": 2,
+						   "cloudMid": 3, "cloudHigh": 5, "windKmh": 8, "gustsKmh": 12,
+						   "dewSpreadC": 3.0, "precipPct": 0, "visibilityKm": 20.0,
+						   "cloudConvergence": None},
+	}]}]}
+	cl.log_run(out, datetime(2026, 6, 4, 6, 0, tzinfo=timezone.utc))
+	conn = cl.connect()
+	spread = conn.execute("SELECT cloud_spread FROM forecasts").fetchone()[0]
+	conn.close()
+	assert spread is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

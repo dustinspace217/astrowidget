@@ -82,7 +82,27 @@ CREATE TABLE IF NOT EXISTS forecasts (
     best_window_end   TEXT,
     managed         INTEGER,         -- 0/1
     dark_start      TEXT,
-    dark_end        TEXT
+    dark_end        TEXT,
+    -- Raw forecast READINGS (what Astrospheric / Open-Meteo actually reported),
+    -- averaged over the dark window — the enrich_night_factors() displayFactors the
+    -- QML shows. Stored next to the SCORES above so calibration can correlate the
+    -- actual reads against the lived outcome (FITS grade + decision), not just the
+    -- engine's own scores. Forward-only: rows logged before this addition are NULL here.
+    seeing_raw         REAL,
+    seeing_label       TEXT,
+    transparency_raw   REAL,
+    transparency_label TEXT,
+    st_source          TEXT,         -- 'astrospheric' / '7timer' (OPPOSITE raw scales)
+    cloud_pct          INTEGER,
+    cloud_low          INTEGER,
+    cloud_mid          INTEGER,
+    cloud_high         INTEGER,
+    wind_kmh           INTEGER,
+    gusts_kmh          INTEGER,
+    dew_spread_c       REAL,
+    precip_pct         INTEGER,
+    visibility_km      REAL,
+    cloud_spread       INTEGER       -- model cloud-cover disagreement (max - min %)
 );
 CREATE INDEX IF NOT EXISTS ix_forecasts_night ON forecasts(night_date, site_id);
 
@@ -118,12 +138,57 @@ CREATE INDEX IF NOT EXISTS ix_grades_night ON fits_grades(night_date, site_id);
 """
 
 
+# Columns ADD-ed to an existing `forecasts` table (CREATE TABLE IF NOT EXISTS cannot
+# add columns to a table that already exists). _migrate is PRAGMA-guarded so it's a
+# no-op once present. Keep in sync with the raw-reading columns in _SCHEMA above.
+_FORECAST_RAW_COLUMNS = [
+	("seeing_raw", "REAL"), ("seeing_label", "TEXT"),
+	("transparency_raw", "REAL"), ("transparency_label", "TEXT"),
+	("st_source", "TEXT"),
+	("cloud_pct", "INTEGER"), ("cloud_low", "INTEGER"),
+	("cloud_mid", "INTEGER"), ("cloud_high", "INTEGER"),
+	("wind_kmh", "INTEGER"), ("gusts_kmh", "INTEGER"),
+	("dew_spread_c", "REAL"), ("precip_pct", "INTEGER"),
+	("visibility_km", "REAL"), ("cloud_spread", "INTEGER"),
+]
+
+# The displayFactors keys log_run reads — an UNWRITTEN contract with the fetcher's
+# enrich_night_factors (a separate file). If a producer-side rename drifts from these,
+# every .get() in log_run silently yields NULL and the row still "succeeds", quietly
+# dropping real readings for weeks. This set lets log_run WARN on drift instead. Keep
+# in sync with enrich_night_factors' displayFactors dict.
+_EXPECTED_DF_KEYS = frozenset({
+	"seeing", "transparency", "source", "cloudPct", "cloudLow", "cloudMid",
+	"cloudHigh", "windKmh", "gustsKmh", "dewSpreadC", "precipPct",
+	"visibilityKm", "cloudConvergence",
+})
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+	"""Add any missing forecast raw-reading columns to a pre-existing DB. A fresh DB
+	already has them from _SCHEMA; this catches a DB created before they were added.
+	PRAGMA table_info lists the current columns, so ALTER runs only for the missing
+	ones — idempotent, and it never touches existing rows (they stay NULL there)."""
+	existing = {row[1] for row in conn.execute("PRAGMA table_info(forecasts)")}
+	for name, col_type in _FORECAST_RAW_COLUMNS:
+		if name not in existing:
+			try:
+				conn.execute(f"ALTER TABLE forecasts ADD COLUMN {name} {col_type}")
+			except sqlite3.OperationalError as e:
+				# Name the migration + the offending column, so a caller's log doesn't
+				# show an opaque "DB open failed" that has to be reverse-engineered.
+				raise sqlite3.OperationalError(
+					f"calibration migration failed adding forecasts.{name}: {e}") from e
+	conn.commit()
+
+
 def connect() -> sqlite3.Connection:
 	"""Open (creating the dir + tables if needed) and return a connection. Callers
 	close it. Idempotent: re-running the schema is safe and forward-migrates."""
 	DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 	conn = sqlite3.connect(str(DB_PATH))
 	conn.executescript(_SCHEMA)
+	_migrate(conn)
 	return conn
 
 
@@ -202,14 +267,34 @@ def log_run(scoring_output: dict[str, Any], fetched_at: datetime) -> int:
 				# Fall back to the fetch instant if there's no dark window.
 				ref_local = _iso_to_local(dark_start) or fetched_at.astimezone()
 				night_date = observing_date(ref_local)
+				# Raw readings the QML shows (enrich_night_factors' displayFactors). None
+				# when no hourly slice was available — each .get() then yields None → NULL.
+				df = night.get("displayFactors") or {}
+				# A PRESENT displayFactors that's missing expected keys = producer/consumer
+				# key drift (a fetcher-side rename). WARN loudly — otherwise the .get()s
+				# below silently NULL real readings for weeks. Fires zero times for the
+				# legitimate no-slice case (df is {}, so the `df and` short-circuits).
+				if df and not _EXPECTED_DF_KEYS <= df.keys():
+					sys.stderr.write(
+						"astrowidget: calibration log: displayFactors missing "
+						f"{sorted(_EXPECTED_DF_KEYS - df.keys())} — fetcher key drift? "
+						"storing NULL for those readings.\n")
+				see = df.get("seeing") or {}
+				tra = df.get("transparency") or {}
+				conv = df.get("cloudConvergence") or {}
 				conn.execute(
 					"""INSERT INTO forecasts (
 						fetched_at, night_date, night_label, site_id, recommendation,
 						bb_score, bb_verdict, nb_score, nb_verdict,
 						cloud, stability, sky_brightness, transparency,
 						moon_illum, moon_alt, precip_peak_pct,
-						best_window_start, best_window_end, managed, dark_start, dark_end
-					) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+						best_window_start, best_window_end, managed, dark_start, dark_end,
+						seeing_raw, seeing_label, transparency_raw, transparency_label,
+						st_source, cloud_pct, cloud_low, cloud_mid, cloud_high,
+						wind_kmh, gusts_kmh, dew_spread_c, precip_pct, visibility_km,
+						cloud_spread
+					) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+							  ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
 					(
 						fetched_iso, night_date, night.get("label"), sid,
 						night.get("recommendation"),
@@ -222,6 +307,13 @@ def log_run(scoring_output: dict[str, Any], fetched_at: datetime) -> int:
 						bw.get("start"), bw.get("end"),
 						1 if night.get("managed") else 0,
 						dark_start, dw.get("end"),
+						see.get("raw"), see.get("label"),
+						tra.get("raw"), tra.get("label"),
+						df.get("source"), df.get("cloudPct"), df.get("cloudLow"),
+						df.get("cloudMid"), df.get("cloudHigh"),
+						df.get("windKmh"), df.get("gustsKmh"), df.get("dewSpreadC"),
+						df.get("precipPct"), df.get("visibilityKm"),
+						conv.get("spread"),
 					),
 				)
 				rows += 1

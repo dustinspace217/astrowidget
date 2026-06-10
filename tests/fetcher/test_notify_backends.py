@@ -102,3 +102,28 @@ def test_notify_sanitizes_before_dispatch():
 	title, body, urgency = lin.call_args.args
 	assert title == "Title with newline"
 	assert "\x07" not in body and body == "bodybell"
+
+
+def test_notify_linux_nonzero_exit_degrades_to_stderr(capsys):
+	"""notify-send RUNNING but exiting non-zero (daemon down, D-Bus env not
+	imported into the user manager) used to vanish the message with zero trace
+	(QA 2026-06-09). The returncode is now checked and the full content
+	degrades to a stderr line, mirroring the spawn-failure path."""
+	from unittest.mock import MagicMock
+	proc = MagicMock()
+	proc.returncode = 1
+	with patch.object(fx.subprocess, "run", return_value=proc):
+		fx._notify_linux("Title", "Body", "normal")
+	err = capsys.readouterr().err
+	assert "notify-send exited 1" in err
+	assert "Title" in err and "Body" in err
+
+
+def test_notify_linux_zero_exit_stays_silent(capsys):
+	"""Healthy delivery writes nothing to stderr — no noise on the happy path."""
+	from unittest.mock import MagicMock
+	proc = MagicMock()
+	proc.returncode = 0
+	with patch.object(fx.subprocess, "run", return_value=proc):
+		fx._notify_linux("Title", "Body", "normal")
+	assert capsys.readouterr().err == ""

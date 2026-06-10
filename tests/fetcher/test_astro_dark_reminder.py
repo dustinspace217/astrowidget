@@ -11,10 +11,48 @@ The state.json carries astroDarkNotifiedFor (site_id → ISO timestamp)
 so the next run knows which windows have already been alerted.
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import astrowidget_fetch as fx
+
+
+def test_marker_persists_across_runs_via_main_tail_sequence(tmp_path, monkeypatch):
+	"""Pins the marker-persistence contract behind the main() tail reorder
+	(QA 2026-06-09): prev is the LAST run's state.json (not state.prev.json,
+	which at read time held the state from TWO runs back), notifications are
+	emitted BEFORE the state write (the old write-then-emit order discarded
+	the freshly-set astroDarkNotifiedFor marker every run), and a second run
+	therefore sees the marker and does NOT re-fire. With the old code either
+	half regresses this test: PREV-file reads give run 2 a None prev (refire),
+	and write-then-emit never persists the marker (refire)."""
+	monkeypatch.setattr(fx, "CACHE_DIR", tmp_path)
+	monkeypatch.setattr(fx, "STATE_PATH", tmp_path / "state.json")
+	monkeypatch.setattr(fx, "PREV_STATE_PATH", tmp_path / "state.prev.json")
+	now = datetime.now(timezone.utc)
+	dark_start = (now - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+	dark_end = (now + timedelta(hours=4)).isoformat().replace("+00:00", "Z")
+
+	# Run 1 — the exact main() tail sequence: prev → emit (mutates) → write.
+	state = _state_with_dark("BB+NB", dark_start, dark_end)
+	with patch.object(fx, "_notify") as nf:
+		prev = fx.load_prev_state()
+		fx.emit_notifications(prev, state, _cfg())
+		fx.write_state(state)
+	nf.assert_called_once()
+	on_disk = json.loads((tmp_path / "state.json").read_text())
+	assert on_disk.get("astroDarkNotifiedFor", {}).get("site_a") == dark_start, (
+		"the fired-once marker must be SERIALIZED — emit must precede write"
+	)
+
+	# Run 2 — same dark window: the persisted marker must suppress a re-fire.
+	state2 = _state_with_dark("BB+NB", dark_start, dark_end)
+	with patch.object(fx, "_notify") as nf2:
+		prev2 = fx.load_prev_state()
+		fx.emit_notifications(prev2, state2, _cfg())
+		fx.write_state(state2)
+	nf2.assert_not_called()
 
 
 def _state_with_dark(rec: str, dark_start: str, dark_end: str) -> dict:

@@ -54,6 +54,26 @@ cp build/bundle/bin/score_location ../bin/astrowidget-score
 native assets that need its build/link hooks. The produced binary
 (`../bin/astrowidget-score`) is gitignored; this source is what's tracked.
 
+## NaN convention divergence (2026-06-09, QA)
+
+This vendored copy's `HourlyWeather.precipitationProbability` defaults to
+**NaN** when absent (astroplan upstream uses 50.0). Two latent landmines this
+creates for FUTURE consumers of the vendored engine — both verified
+unreachable from `bin/score_location.dart` today:
+
+- `VetoEvaluator.checkPrecipitation` now filters NaN hours before averaging
+  (fixed here); upstream's unfiltered average would NaN-poison and silently
+  disable the veto.
+- `HourlyWeather.toJson` / `WeatherForecast.toJson` emit raw NaN, which
+  `jsonEncode` REJECTS — do not route parsed forecasts back through toJson
+  without a NaN strategy. The wrapper hand-builds its output maps and never
+  calls toJson.
+
+If re-vendoring from astroplan, re-apply both the NaN default and the
+checkPrecipitation filter (or consciously revert to upstream's 50.0 —
+in which case the wrapper's `_peakPrecipVeto` needs a fabricated-default
+guard instead).
+
 ## Re-vendoring (if you ever pull a fix from astroplan)
 
 The vendored set is the transitive import closure of `bin/score_location.dart`

@@ -9,7 +9,7 @@ Notification on transitions including during astro dark (alert is the
 imaging-start reminder).
 
 ## Tech Stack
-- **Fetcher:** Python 3.12+ (Fedora 43 stock), single external dep: `requests`.
+- **Fetcher:** Python 3.12+ (Fedora 44 stock), single external dep: `requests`.
 - **Scoring:** Dart native binary built (via `dart build cli`) from the in-repo,
   self-contained `scoring/` package — a vendored, pure-Dart copy of the astroplan
   scoring engine (see `scoring/VENDORED.md`). Invoked as a subprocess by the

@@ -133,6 +133,7 @@ def test_build_air_quality_rows_present_but_null_array_no_crash():
 		{"time": ["t0"], "aerosol_optical_depth": 0.05}) == []
 
 
+@pytest.mark.real_aod  # opts out of conftest's autouse stub — tests the REAL function
 def test_fetch_open_meteo_air_quality_is_best_effort(monkeypatch):
 	"""A network/JSON failure returns {} (never raises) so AOD can't abort the run."""
 	import requests
@@ -231,10 +232,30 @@ pytestmark_binary = pytest.mark.skipif(
 	reason=f"scoring binary not built at {fx.SCORING_BINARY}",
 )
 
+# Fail-loud guard (QA 2026-06-09): the incident regression pin in this file
+# must not vanish as a silent skip on an unbuilt checkout/CI. With
+# ASTROWIDGET_REQUIRE_BINARY=1, a missing binary is a loud collection error
+# instead of a skip.
+if os.environ.get("ASTROWIDGET_REQUIRE_BINARY") == "1" and not fx.SCORING_BINARY.exists():
+	raise RuntimeError(
+		f"ASTROWIDGET_REQUIRE_BINARY=1 but the scoring binary is missing at "
+		f"{fx.SCORING_BINARY} — build it (see CLAUDE.md Key Commands)"
+	)
+
 
 def _run_binary(now_utc: datetime, *, cloud: float, managed: bool,
-				bortle=5, precip=5.0, with_aod=True, with_250=True) -> dict:
-	"""Crafts one stdin payload, runs the real binary, returns tonight's night dict."""
+				bortle=5, precip=5.0, with_aod=True, with_250=True,
+				wind=6.0, wind_pattern=None, precip_null_every=None,
+				aod=0.06, thresholds=None) -> dict:
+	"""Crafts one stdin payload, runs the real binary, returns tonight's night dict.
+
+	Extras (QA 2026-06-09 veto tests): `wind_pattern` cycles a list of wind
+	speeds across the hours (peak-vs-average tests need a short blow inside an
+	otherwise calm window); `precip_null_every` nulls every Nth hour's precip
+	probability (null-skip tests); `aod` sets the AOD value (NB-vs-BB scoring
+	region needs poor transparency); `thresholds` passes the per-site veto
+	thresholds dict verbatim so tests don't depend on binary defaults.
+	"""
 	hours, aq = [], []
 	for i in range(72):
 		t = (now_utc + timedelta(hours=i)).strftime("%Y-%m-%dT%H:00")
@@ -242,21 +263,30 @@ def _run_binary(now_utc: datetime, *, cloud: float, managed: bool,
 			"time": t, "cloud_cover": cloud, "cloud_cover_low": cloud * 0.5,
 			"cloud_cover_mid": cloud * 0.3, "cloud_cover_high": cloud * 0.1,
 			"relative_humidity_2m": 55.0, "temperature_2m": 12.0, "dewpoint_2m": 4.0,
-			"wind_speed_10m": 6.0, "wind_gusts_10m": 12.0,
-			"precipitation_probability": precip, "precipitation": 0.0,
+			"wind_speed_10m": (
+				wind_pattern[i % len(wind_pattern)] if wind_pattern else wind
+			),
+			"wind_gusts_10m": 12.0,
+			"precipitation_probability": (
+				None if (precip_null_every and i % precip_null_every == 0)
+				else precip
+			),
+			"precipitation": 0.0,
 			"visibility": 30000.0,
 		}
 		if with_250:
 			row["wind_speed_250hPa"] = 30.0
 		hours.append(row)
 		if with_aod:
-			aq.append({"time": t, "aerosol_optical_depth": 0.06})
+			aq.append({"time": t, "aerosol_optical_depth": aod})
 	# Synthetic round-number coordinates (eastern Oregon, inside the NA domain) —
 	# NOT a real site. The repo is public; tests must never carry real lat/lon.
 	site = {"id": "b", "label": "B", "lat": 45.0, "lon": -120.0,
 			"managed": managed, "hourly": hours, "airQuality": aq}
 	if bortle is not None:
 		site["bortle"] = bortle
+	if thresholds is not None:
+		site["thresholds"] = thresholds
 	payload = {"now_utc": now_utc.isoformat(), "sites": [site]}
 	out = subprocess.run([str(fx.SCORING_BINARY)], input=json.dumps(payload),
 						  capture_output=True, text=True)
@@ -312,6 +342,82 @@ def test_overcast_veto_fires_in_both_modes():
 		assert night["recommendation"] == "Neither"
 		veto_names = [v["name"] for v in night["broadband"]["vetoes"]]
 		assert "cloud" in veto_names, f"managed={managed}: overcast must fire the cloud veto"
+
+
+@pytestmark_binary
+def test_peak_wind_vetoes_short_blow_average_does_not():
+	"""QA 2026-06-09: wind must PEAK-check over the window, not average — the
+	cloud-gate incident's structural lesson (a veto-class factor hiding inside
+	a mean) applied to the factor that physically closes iTelescope domes.
+	The pattern 10,10,10,60 km/h puts a 60 in EVERY 4-hour stretch (so the
+	dark window certainly contains one) while averaging 22.5 — far under the
+	48 km/h threshold. The engine's old average check passed this; the peak
+	check must veto. Control: flat calm wind must not."""
+	now = datetime(2026, 12, 9, 6, tzinfo=timezone.utc)
+	thr = {"wind_max_kmh": 48.0}
+	blow = _run_binary(now, cloud=10.0, managed=True, bortle=4,
+					   wind_pattern=[10.0, 10.0, 10.0, 60.0], thresholds=thr)
+	names = [v["name"] for v in blow["broadband"]["vetoes"]]
+	assert "wind" in names, f"peak 60 km/h must veto at 48: {blow['broadband']['vetoes']}"
+	assert blow["recommendation"] == "Neither"
+	calm = _run_binary(now, cloud=10.0, managed=True, bortle=4,
+					   wind=10.0, thresholds=thr)
+	assert all(v["name"] != "wind" for v in calm["broadband"]["vetoes"])
+
+
+@pytestmark_binary
+def test_missing_precip_hours_do_not_fabricate_a_veto():
+	"""QA 2026-06-09: an absent precip hour rides the null-skip convention
+	(like jet wind / temperature / dewpoint), NOT the old fabricated 50% —
+	which under PEAK veto semantics instantly vetoed a bone-dry HOME night at
+	a 10% threshold. A dry night (2%) with every 6th hour null must not
+	precip-veto; a genuinely wet night still must."""
+	now = datetime(2026, 12, 9, 6, tzinfo=timezone.utc)
+	thr = {"precip_max_pct": 10.0}
+	dry = _run_binary(now, cloud=10.0, managed=False, bortle=4,
+					  precip=2.0, precip_null_every=6, thresholds=thr)
+	assert all(v["name"] != "precipitation" for v in dry["broadband"]["vetoes"]), (
+		f"null precip hours fabricated a veto: {dry['broadband']['vetoes']}"
+	)
+	wet = _run_binary(now, cloud=10.0, managed=False, bortle=4,
+					  precip=40.0, thresholds=thr)
+	assert any(v["name"] == "precipitation" for v in wet["broadband"]["vetoes"])
+
+
+@pytestmark_binary
+def test_bb_pass_implies_nb_pass_floor():
+	"""QA 2026-06-09: BB-viable ⇒ NB-viable — narrowband tolerates everything
+	broadband does (it REJECTS the moonlight/LP broadband needs gone). The v2
+	NB re-weights can SCORE NB below BB on dark, poor-transparency nights,
+	which used to collapse a BB-passing night to 'Neither' (impossible
+	physics). Invariant sweep: any un-vetoed night whose broadband reads
+	good+ must recommend BB+NB — including high-AOD configs that hit the
+	NB<BB scoring region. Asserts the invariant actually fired (non-vacuous)."""
+	now = datetime(2026, 12, 9, 6, tzinfo=timezone.utc)
+	fired = 0
+	floor_exercised = 0
+	for aod in (0.06, 0.5, 0.9):
+		for cloud in (5.0, 20.0):
+			night = _run_binary(now, cloud=cloud, managed=False, bortle=3, aod=aod)
+			bb = night["broadband"]
+			if bb["score"] >= 60 and not bb["vetoes"]:
+				fired += 1
+				# The floor only DOES anything where NB scores below 'good'
+				# while BB passes — count those, or a recalibration could
+				# empty the region and leave the floor decoratively tested
+				# (QA Phase B 2026-06-09: fired>0 guards the wrong axis).
+				if night["narrowband"]["score"] < 60:
+					floor_exercised += 1
+				assert night["recommendation"] == "BB+NB", (
+					f"aod={aod} cloud={cloud}: broadband passes "
+					f"(score {bb['score']}) but recommendation is "
+					f"{night['recommendation']}"
+				)
+	assert fired > 0, "sweep never produced a passing broadband night — vacuous test"
+	assert floor_exercised > 0, (
+		"sweep never hit the NB<good-while-BB-passes region the floor exists "
+		"for — widen the sweep (engine recalibration?) or the floor is untested"
+	)
 
 
 @pytestmark_binary

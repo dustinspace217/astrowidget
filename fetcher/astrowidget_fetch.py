@@ -1093,7 +1093,13 @@ def merge_hourly(
 			"dewpoint_2m": _safe(dewpoint, i, 5.0),
 			"wind_speed_10m": _safe(wind, i, 0.0),
 			"wind_gusts_10m": _safe(gusts, i, 0.0),
-			"precipitation_probability": _safe(precip_prob, i, 50.0),
+			# None when absent (NOT a fabricated 50%). The 50% pessimistic
+			# default predates the PEAK precip veto: under averaging it was a
+			# mild penalty, but under peak semantics one missing hour became an
+			# instant veto at a 10% home threshold — a hard "Neither" on a dry
+			# night (QA 2026-06-09). Dart maps null → NaN and the peak skips
+			# NaN hours, same convention as jet wind / temperature / dewpoint.
+			"precipitation_probability": _safe_optional(precip_prob, i),
 			"precipitation": _safe(precip, i, 0.0),
 			"visibility": _safe(visibility, i, 10000.0),
 			# 250 hPa jet wind — None when absent (NOT 0.0). The Dart HourlyWeather
@@ -1479,27 +1485,32 @@ def write_state(new_state: dict[str, Any]) -> None:
 
 def load_prev_state() -> dict[str, Any] | None:
 	"""
-	Returns the prior state.prev.json contents, or None if missing or corrupt.
+	Returns the PREVIOUS RUN's state — state.json as the last run wrote it,
+	read BEFORE this run overwrites it. None if missing or corrupt.
 
-	If state.prev.json is malformed (e.g., disk failure mid-write), we log
-	to stderr and remove the corrupt file. The next run will treat the
-	current state as a fresh start (no diff-based notifications), which is
-	the right behavior — the alternative would be silently suppressing all
-	upgrade/downgrade alerts indefinitely.
+	Until 2026-06-09 this read state.prev.json instead — which, at the point
+	main() called it, still held the state from TWO runs back (the rotation
+	in write_state hadn't happened yet). Consequence: every up/down
+	transition was diffed against stale data and fired on two consecutive
+	runs (QA finding). state.prev.json is now inert rotation residue: nothing
+	reads it, and state.json is regenerated from live APIs every run, so the
+	file protects nothing irreplaceable (QA Phase B adjudicated docstring-
+	accept over guarding its rotation — a per-run parse of a zero-consumer
+	file is anti-coverage).
+
+	On corrupt state.json we just log and return None (fresh-start, no
+	diff notifications this run) — no unlink needed, since write_state
+	atomically replaces the file later this run anyway.
 	"""
-	if not PREV_STATE_PATH.exists():
+	if not STATE_PATH.exists():
 		return None
 	try:
-		return json.loads(PREV_STATE_PATH.read_text(encoding="utf-8"))
+		return json.loads(STATE_PATH.read_text(encoding="utf-8"))
 	except (OSError, json.JSONDecodeError) as e:
 		sys.stderr.write(
-			f"astrowidget: state.prev.json corrupt or unreadable ({e}); "
-			f"removing so the next run starts fresh.\n"
+			f"astrowidget: state.json corrupt or unreadable ({e}); "
+			f"treating this run as a fresh start.\n"
 		)
-		try:
-			PREV_STATE_PATH.unlink()
-		except OSError:
-			pass
 		return None
 
 
@@ -1537,6 +1548,12 @@ def emit_notifications(
 	# this dark window" map. Keys are site ids; values are the ISO timestamp
 	# of the dark_window.start we most recently notified for.
 	dark_notified = dict((prev or {}).get("astroDarkNotifiedFor", {}))
+	# Attach to the outgoing state IMMEDIATELY (the dict is mutated in place
+	# below): if a later site throws mid-loop, the markers for sites that
+	# already fired still land in state.json — partial markers beat the old
+	# all-or-nothing drop, which re-fired EVERY site's reminder after a single
+	# cross-site exception (QA Phase B 2026-06-09, unanimous adjudication).
+	new["astroDarkNotifiedFor"] = dark_notified
 	now_utc = datetime.now(timezone.utc)
 
 	for site in new.get("sites", []):
@@ -1602,8 +1619,6 @@ def emit_notifications(
 				)
 				dark_notified[sid] = dw_start_str
 
-	new["astroDarkNotifiedFor"] = dark_notified
-
 
 def _sanitize_notify_text(s: str) -> str:
 	"""
@@ -1661,7 +1676,7 @@ def _notify(title: str, body: str, urgency: str = "normal") -> None:
 
 def _notify_linux(title: str, body: str, urgency: str) -> None:
 	"""Linux desktop notification via libnotify's notify-send (the original)."""
-	subprocess.run(
+	proc = subprocess.run(
 		[
 			"notify-send",
 			"--app-name=astrowidget",
@@ -1673,6 +1688,16 @@ def _notify_linux(title: str, body: str, urgency: str) -> None:
 		check=False,
 		timeout=5,
 	)
+	# notify-send can RUN and still fail to deliver (daemon down, D-Bus env not
+	# imported into the user manager — the classic for systemd --user services).
+	# check=False means that exit code was previously dropped on the floor: the
+	# message vanished with no trace anywhere (QA 2026-06-09). Mirror the
+	# spawn-failure path: degrade to a stderr line carrying the full content.
+	if proc.returncode != 0:
+		sys.stderr.write(
+			f"astrowidget: notify-send exited {proc.returncode} "
+			f"[{urgency}] {title}: {body}\n"
+		)
 
 
 def _notify_macos(title: str, body: str) -> None:
@@ -2106,9 +2131,22 @@ def main() -> int:
 		"sites": site_results,
 	}
 
+	# ORDER MATTERS (QA 2026-06-09): read the previous run's state FIRST,
+	# then emit notifications — which mutates state["astroDarkNotifiedFor"],
+	# the fired-once-per-dark-window marker — and only THEN serialize. The
+	# old order (write, then emit) threw the marker away every run, so the
+	# astro-dark reminder re-fired on every fetch inside a GO dark window.
+	# Notifications are a convenience: a failure there must never block the
+	# state write (the plasmoid's data), hence the broad guard.
 	prev = load_prev_state()
+	try:
+		emit_notifications(prev, state, cfg)
+	except Exception as e:
+		sys.stderr.write(
+			f"astrowidget: emit_notifications failed [{type(e).__name__}: {e}] "
+			f"— continuing to state write.\n"
+		)
 	write_state(state)
-	emit_notifications(prev, state, cfg)
 
 	return 0
 

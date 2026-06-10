@@ -353,7 +353,7 @@ def latest_forecast(conn: sqlite3.Connection, night_date: str, site_id: str,
 		"""SELECT recommendation, bb_score, nb_score, cloud, transparency,
 				  moon_illum, best_window_start, best_window_end
 		   FROM forecasts
-		   WHERE night_date = ? AND site_id = ? AND night_label = ?
+		   WHERE night_date = ? AND site_id = ? COLLATE NOCASE AND night_label = ?
 		   ORDER BY fetched_at DESC LIMIT 1""",
 		(night_date, site_id, night_label),
 	).fetchone()
@@ -385,7 +385,7 @@ def get_decision(conn: sqlite3.Connection, night_date: str,
 	a night, so re-editing edits it instead of silently overwriting with blank defaults
 	(which lost a note once)."""
 	row = conn.execute(
-		"SELECT imaged, reason, notes FROM decisions WHERE night_date = ? AND site_id = ?",
+		"SELECT imaged, reason, notes FROM decisions WHERE night_date = ? AND site_id = ? COLLATE NOCASE",
 		(night_date, site_id),
 	).fetchone()
 	return None if row is None else {"imaged": row[0], "reason": row[1], "notes": row[2]}
@@ -420,8 +420,8 @@ def pending_nights(conn: sqlite3.Connection, site_id: str, limit: int = 14,
 		"""SELECT DISTINCT f.night_date
 		   FROM forecasts f
 		   LEFT JOIN decisions d
-			 ON d.night_date = f.night_date AND d.site_id = f.site_id
-		   WHERE f.site_id = ? AND f.night_label = 'Tonight' AND d.imaged IS NULL
+			 ON d.night_date = f.night_date AND d.site_id = f.site_id COLLATE NOCASE
+		   WHERE f.site_id = ? COLLATE NOCASE AND f.night_label = 'Tonight' AND d.imaged IS NULL
 			 AND f.night_date <= ?
 		   ORDER BY f.night_date DESC LIMIT ?""",
 		(site_id, as_of, limit),

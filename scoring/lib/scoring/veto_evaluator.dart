@@ -104,9 +104,19 @@ class VetoEvaluator {
 		List<HourlyWeather> hours, double threshold,
 	) {
 		if (hours.isEmpty) return null;
-		final avgPrecipProb = hours
+		// Skip NaN hours (absent data): precipitationProbability's absent
+		// default became NaN on 2026-06-09 (see weather_models.dart). Without
+		// this filter, one missing hour NaN-poisons the average and silently
+		// DISABLES this veto for any scoreTarget/evaluateAll consumer. The
+		// astrowidget wrapper never calls this path (it peak-checks instead),
+		// but the vendored engine must stay internally NaN-safe — same guard
+		// pattern as checkCondensation's temp/dewpoint handling (GitHub #32).
+		final valid = hours
 			.map((h) => h.precipitationProbability)
-			.reduce((a, b) => a + b) / hours.length;
+			.where((p) => !p.isNaN)
+			.toList();
+		if (valid.isEmpty) return null;
+		final avgPrecipProb = valid.reduce((a, b) => a + b) / valid.length;
 		if (avgPrecipProb > threshold) {
 			return VetoResult(
 				vetoName: 'precipitation',

@@ -53,16 +53,20 @@ def assess(conn, site_id: str = "Bainbridge",
 	Returns the per-night detail, counts, the condition spread, and a `ready` flag
 	(enough joinable nights AND across enough condition bands). Pure (takes an open
 	conn) so it's unit-tested without a GUI or the real DB."""
+	# COLLATE NOCASE on every site_id comparison (QA 2026-06-09): site ids in
+	# the live DB are mixed-case ("Bainbridge" vs "chile") and SQLite `=` is
+	# case-sensitive — a casing drift between config/units/DB would silently
+	# produce zero joins (a near-miss the review chased before refuting).
 	forecasts = {r[0]: r[1] for r in conn.execute(
 		"""SELECT night_date, MAX(cloud) FROM forecasts
-		   WHERE site_id = ? AND night_label = 'Tonight' GROUP BY night_date""",
+		   WHERE site_id = ? COLLATE NOCASE AND night_label = 'Tonight' GROUP BY night_date""",
 		(site_id,))}
 	graded = {r[0] for r in conn.execute(
-		"SELECT DISTINCT night_date FROM fits_grades WHERE site_id = ?", (site_id,))}
+		"SELECT DISTINCT night_date FROM fits_grades WHERE site_id = ? COLLATE NOCASE", (site_id,))}
 	skipped = {r[0] for r in conn.execute(
-		"SELECT DISTINCT night_date FROM decisions WHERE site_id = ? AND imaged = 0", (site_id,))}
+		"SELECT DISTINCT night_date FROM decisions WHERE site_id = ? COLLATE NOCASE AND imaged = 0", (site_id,))}
 	imaged = {r[0] for r in conn.execute(
-		"SELECT DISTINCT night_date FROM decisions WHERE site_id = ? AND imaged = 1", (site_id,))}
+		"SELECT DISTINCT night_date FROM decisions WHERE site_id = ? COLLATE NOCASE AND imaged = 1", (site_id,))}
 
 	rows: list[dict[str, Any]] = []
 	for nd in sorted(forecasts):
@@ -119,19 +123,56 @@ def main() -> int:
 	conn = cl.connect()
 	try:
 		a = assess(conn, args.site, args.min_nights, args.min_bands)
+		# Unanswered-decision backlog (QA 2026-06-09): the nightly form drains
+		# ONE night per open, so an away stretch accumulates pending nights at
+		# zero-per-day net — and a stalled labeling loop previously looked
+		# identical to healthy thin data in this report.
+		pending = cl.pending_nights(conn, args.site)
 	finally:
 		conn.close()
 	print(format_report(a))
+	if pending:
+		# pending_nights caps at limit=14 — print "14+" at the cap so a
+		# 30-night backlog doesn't masquerade as exactly 14 (QA 2026-06-09).
+		shown = f"{len(pending)}{'+' if len(pending) >= 14 else ''}"
+		print(f"  unanswered decision nights: {shown} (newest: {pending[0]})")
 
-	if args.notify and a["ready"]:
-		# Only pings when ready, so the weekly timer is silent until it matters.
+	if args.notify:
 		import subprocess
-		subprocess.run(
-			["notify-send", "-u", "normal", "-a", "astrowidget",
-			 "astrowidget: calibration data ready",
-			 f"{a['n']} joinable nights across {len(a['bands'])} conditions — "
-			 "reload astrowidget and ask Claude for a re-tune."],
-			check=False)
+
+		def _ping(title: str, body: str) -> None:
+			"""notify-send with delivery-failure visibility (QA 2026-06-09):
+			check=False used to drop a non-zero exit silently — the daemon being
+			down, or D-Bus env not imported into the user manager, vanished the
+			message with no trace. Mirrors the fetcher's _notify_linux fix,
+			INCLUDING the spawn guard + timeout: a MISSING notify-send would
+			otherwise crash this unit, whose OnFailure backstop needs the same
+			binary — degrading to stderr keeps the report itself alive."""
+			try:
+				proc = subprocess.run(
+					["notify-send", "-u", "normal", "-a", "astrowidget", title, body],
+					check=False, timeout=5)
+			except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+				sys.stderr.write(
+					f"astrowidget: notifier unavailable [{type(e).__name__}] — "
+					f"{title}: {body}\n")
+				return
+			if proc.returncode != 0:
+				sys.stderr.write(
+					f"astrowidget: notify-send exited {proc.returncode} — "
+					f"{title}: {body}\n")
+
+		if a["ready"]:
+			# Only pings when ready, so the weekly timer is silent until it matters.
+			_ping("astrowidget: calibration data ready",
+				  f"{a['n']} joinable nights across {len(a['bands'])} conditions — "
+				  "reload astrowidget and ask Claude for a re-tune.")
+		elif len(pending) >= 5:
+			# Stalled-labeling nudge (QA 2026-06-09): >=5 unanswered nights is a
+			# stall worth one ping; below that, stay silent as designed.
+			_ping("astrowidget: decision backlog",
+				  f"{len(pending)} nights have forecasts but no imaged/skipped "
+				  "answer — open the nightly form to catch up.")
 	return 0
 
 

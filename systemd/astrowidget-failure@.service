@@ -1,0 +1,26 @@
+[Unit]
+Description=Desktop notification when an astrowidget unit fails (%i)
+Documentation=https://github.com/dustinspace217/astrowidget
+# Generic failure notifier, fired via OnFailure= on the fetch/readiness/decision
+# services (QA 2026-06-09: only the grade service had the DEF-3b-03 treatment —
+# an unhandled traceback, OOM-kill at MemoryMax, or TimeoutStartSec SIGKILL in
+# any OTHER unit landed silently in the journal, and the user's first signal was
+# a stale widget icon hours later). The instance name (%i) is the failing unit,
+# so one template covers them all. astrowidget-grade.service keeps its original
+# dedicated notifier (working, grade-specific message) — consolidating it onto
+# this template is optional future hygiene, not worth touching a working unit.
+#
+# VERIFY END-TO-END any time (a desktop notification must appear; first
+# verified 2026-06-09 on Fedora 44/Plasma 6):
+#   systemctl --user start astrowidget-failure@manual-test.service
+
+[Service]
+Type=oneshot
+# notify-send talks to the session notification daemon over D-Bus. A --user
+# service started by the user manager inherits DBUS_SESSION_BUS_ADDRESS +
+# XDG_RUNTIME_DIR on a normal graphical login. If notifications never appear:
+#   systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY DISPLAY
+# -u critical keeps it in notification history; -a sets the app name.
+# %i is the failing unit's name without its .service suffix (callers use
+# OnFailure=astrowidget-failure@%N.service); journalctl accepts the bare name.
+ExecStart=/usr/bin/notify-send -u critical -a astrowidget "astrowidget: %i failed" "Unit %i failed. Check: journalctl --user -u %i -e"

@@ -333,3 +333,45 @@ def test_main_in_domain_both_astrospheric_and_7timer_degrade_coexist(patched_pat
 	# The astrospheric entry carries its code even when 7timer also degraded.
 	as_entry = next(d for d in degraded if d["source"] == "astrospheric")
 	assert as_entry["code"] == "http_5xx"
+
+
+def test_dark_reminder_fires_once_across_real_main_runs(patched_paths):
+	"""END-TO-END pin of main()'s tail ordering (QA Phase B 2026-06-09: the
+	pass's top residual — every other main()-level test disables all
+	notification flags, so a regression back to the old write-then-emit order
+	passed the entire suite while re-firing the dark reminder 4x/day).
+
+	Two REAL fx.main() runs with the reminder enabled: run 1 fires once per
+	GO site and PERSISTS astroDarkNotifiedFor into state.json; run 2 must
+	stay silent. Catches BOTH halves: emit-after-write loses the marker
+	(run 2 re-fires), and prev-from-the-wrong-file gives run 2 an empty
+	prior (run 2 re-fires)."""
+	import copy
+	import json
+	cfg = copy.deepcopy(VALID_CFG)
+	cfg["notifications"] = {
+		"upward_transitions": False,
+		"downward_transitions_day_of": False,
+		"astro_dark_start_reminder": True,
+	}
+
+	def run_once():
+		with patch.object(fx, "load_config", return_value=cfg), \
+			 patch.object(fx, "fetch_astrospheric", return_value=_astrospheric_stub()), \
+			 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
+			 patch.object(fx, "invoke_scoring_binary",
+						  return_value=_scoring_output("site_a", "site_b")), \
+			 patch.object(fx, "_notify") as nf:
+			assert fx.main() == 0
+		# The scoring stub's dark_window.start (2026-05-29T04:00Z) is in the
+		# past, so a GO verdict means the reminder is due "now" on run 1.
+		return [c for c in nf.call_args_list if "astro dark" in c.args[0]]
+
+	first = run_once()
+	assert len(first) == 2, f"both GO sites must fire exactly once on run 1: {first}"
+	state = json.loads((patched_paths / "cache" / "state.json").read_text())
+	assert set(state.get("astroDarkNotifiedFor", {})) == {"site_a", "site_b"}, (
+		"the fired-once markers must be SERIALIZED by main()"
+	)
+	second = run_once()
+	assert second == [], f"persisted markers must suppress run-2 re-fires: {second}"

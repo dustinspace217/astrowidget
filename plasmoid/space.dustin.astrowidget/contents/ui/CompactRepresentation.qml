@@ -99,12 +99,22 @@ MouseArea {
 					radius: width / 2
 					antialiasing: true
 					color: {
+						let base;
 						switch (cell.recommendation) {
-						case "BB+NB":   return Kirigami.Theme.positiveTextColor;
-						case "NB only": return Kirigami.Theme.neutralTextColor;
-						case "Neither": return Kirigami.Theme.negativeTextColor;
-						default:        return Kirigami.Theme.disabledTextColor;
+						case "BB+NB":   base = Kirigami.Theme.positiveTextColor; break;
+						case "NB only": base = Kirigami.Theme.neutralTextColor; break;
+						case "Neither": base = Kirigami.Theme.negativeTextColor; break;
+						default:        base = Kirigami.Theme.disabledTextColor;
 						}
+						// Desaturate when state.json is stale (QA 2026-06-09): the
+						// warning icon already appears, but a full-saturation green
+						// dot still reads "GO" at a glance — 30-hour-old data must
+						// not look current. Qt.tint over the disabled color keeps a
+						// hint of the verdict hue so the sites stay distinguishable.
+						return compact.stateModel.isStale
+							? Qt.tint(Kirigami.Theme.disabledTextColor,
+							          Qt.alpha(base, 0.35))
+							: base;
 					}
 					// Subtle outline for visibility against any background.
 					border.width: 1

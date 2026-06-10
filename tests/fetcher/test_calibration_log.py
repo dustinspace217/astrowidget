@@ -340,3 +340,53 @@ def test_get_decision_roundtrips(tmp_path, monkeypatch):
 	assert cl.get_decision(conn, "2026-06-04", "bainbridge") == {
 		"imaged": 0, "reason": "Precipitation (rain / snow)", "notes": "rainy"}
 	conn.close()
+
+
+def test_site_id_reads_join_across_case_but_writes_stay_binary(tmp_path, monkeypatch):
+	"""Two-part pin of the site-id casing behavior (QA 2026-06-09).
+
+	READ side (the fix): every site_id query carries COLLATE NOCASE, so a
+	casing drift between writers (config vs systemd units vs DB history —
+	the live DB holds mixed-case ids) degrades to NOTHING instead of weeks of
+	silently-zero joins. 'Bainbridge' forecasts must join 'bainbridge'
+	decisions regardless of the casing the caller queries with.
+
+	WRITE side, pinned as EXPECTED CURRENT BEHAVIOR: the UNIQUE constraints
+	remain BINARY-collated, so case-variant writers bifurcate into separate
+	rows (a phantom forever-pending night). If someone later adds NOCASE to
+	the constraint/migrates, the second half FAILS and forces a conscious
+	review of existing-row migration — visible hazard beats invisible.
+	"""
+	monkeypatch.setattr(cl, "DB_PATH", tmp_path / "astrowidget.db")
+	conn = cl.connect()
+	try:
+		# Seed one Tonight forecast under the capitalized id, dated yesterday
+		# (pending_nights only surfaces nights that have already occurred).
+		from datetime import timedelta
+		night = (datetime.now().astimezone() - timedelta(days=1)).strftime("%Y-%m-%d")
+		conn.execute(
+			"INSERT INTO forecasts (fetched_at, night_date, night_label, site_id)"
+			" VALUES (?, ?, 'Tonight', 'Bainbridge')",
+			(datetime.now(timezone.utc).isoformat(), night))
+		conn.commit()
+
+		# READ: a lowercase pending row + an UPPERCASE query still join.
+		cl.ensure_pending(conn, night, "bainbridge")
+		assert cl.pending_nights(conn, "BAINBRIDGE") == [night]
+		# Answering through yet another casing of the SAME row's site_id —
+		# upsert targets (night_date, site_id) BINARY, so to answer the
+		# existing row we must use ITS casing; the read-side join then clears.
+		cl.upsert_decision(conn, night, "bainbridge", imaged=True)
+		assert cl.pending_nights(conn, "Bainbridge") == []
+
+		# WRITE: a case-variant upsert does NOT replace — it bifurcates.
+		cl.upsert_decision(conn, night, "BAINBRIDGE", imaged=False, reason="x")
+		n_rows = conn.execute(
+			"SELECT COUNT(*) FROM decisions WHERE night_date = ?", (night,)
+		).fetchone()[0]
+		assert n_rows == 2, (
+			"BINARY-collated UNIQUE bifurcated as expected; if this fails, "
+			"the constraint went NOCASE — review existing-row migration!"
+		)
+	finally:
+		conn.close()

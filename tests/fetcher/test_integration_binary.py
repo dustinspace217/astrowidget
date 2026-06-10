@@ -16,6 +16,7 @@ stays green on a fresh checkout. Build it with:
 """
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -27,6 +28,15 @@ pytestmark = pytest.mark.skipif(
 	not fx.SCORING_BINARY.exists(),
 	reason=f"scoring binary not built at {fx.SCORING_BINARY}",
 )
+
+# Fail-loud guard (QA 2026-06-09): same as test_scoring_redesign.py — with
+# ASTROWIDGET_REQUIRE_BINARY=1 a missing binary is a collection error, so the
+# end-to-end pipeline trace can't silently vanish as a skip in CI.
+if os.environ.get("ASTROWIDGET_REQUIRE_BINARY") == "1" and not fx.SCORING_BINARY.exists():
+	raise RuntimeError(
+		f"ASTROWIDGET_REQUIRE_BINARY=1 but the scoring binary is missing at "
+		f"{fx.SCORING_BINARY} — build it (see CLAUDE.md Key Commands)"
+	)
 
 # Anchor the fixture to the START of the current UTC day so the 96-hour (4-day)
 # window always covers tonight + the next two nights relative to main()'s real

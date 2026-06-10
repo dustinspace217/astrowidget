@@ -62,23 +62,30 @@ def test_write_state_atomic_via_tmp_rename(tmp_path, monkeypatch):
 
 
 def test_load_prev_state_returns_none_when_absent(tmp_path, monkeypatch):
-	"""Missing state.prev.json → None (clean first-run behavior)."""
-	monkeypatch.setattr(fx, "PREV_STATE_PATH", tmp_path / "absent.json")
+	"""Missing state.json → None (clean first-run behavior).
+
+	Contract change 2026-06-09 (QA): load_prev_state reads STATE_PATH — the
+	LAST run's state.json, before this run overwrites it — not
+	state.prev.json, which at call time held the state from TWO runs back
+	(transition notifications fired twice per change)."""
+	monkeypatch.setattr(fx, "STATE_PATH", tmp_path / "absent.json")
 	assert fx.load_prev_state() is None
 
 
-def test_load_prev_state_removes_corrupt_file(tmp_path, monkeypatch):
+def test_load_prev_state_corrupt_file_returns_none_without_unlink(tmp_path, monkeypatch):
 	"""
-	Malformed prev state → log + remove + return None.
-	(Silent swallow flagged by silent-failure-hunter.)
+	Malformed prior state → log + return None, file left IN PLACE.
+	(Silent swallow originally flagged by silent-failure-hunter; the unlink
+	went away with the 2026-06-09 retarget to STATE_PATH — write_state
+	atomically replaces the corrupt file later the same run, and unlinking
+	the live state.json early would briefly blank the plasmoid for nothing.)
 	"""
-	prev = tmp_path / "prev.json"
-	prev.write_text("this is not json", encoding="utf-8")
-	monkeypatch.setattr(fx, "PREV_STATE_PATH", prev)
+	state = tmp_path / "state.json"
+	state.write_text("this is not json", encoding="utf-8")
+	monkeypatch.setattr(fx, "STATE_PATH", state)
 	result = fx.load_prev_state()
 	assert result is None
-	# Corrupt file is removed so the next run starts cleanly.
-	assert not prev.exists()
+	assert state.exists(), "live state.json must not be unlinked on corrupt read"
 
 
 def test_slice_hourly_for_night_returns_window_hours():

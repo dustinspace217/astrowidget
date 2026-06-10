@@ -192,11 +192,15 @@ def test_graded_keys_returns_night_target_pairs(tmp_path):
 
 def test_site_coords_reads_config(tmp_path):
 	cfg = tmp_path / "config.toml"
+	# Obviously-fake round-number coords (the repo is PUBLIC): the old fixture
+	# carried 47.62/-122.52, which matched the real home config to fixture
+	# precision — location PII in a public tree (QA 2026-06-09). The site NAME
+	# stays; only coords must be synthetic, per test_fetch_astrospheric's model.
 	cfg.write_text(
-		'[[sites]]\nid = "Bainbridge"\nlat = 47.62\nlon = -122.52\n'
+		'[[sites]]\nid = "Bainbridge"\nlat = 47.0\nlon = -122.0\n'
 		'[[sites]]\nid = "UDRO"\nlat = 38.0\nlon = -113.0\n'
 	)
-	assert grade._site_coords("Bainbridge", str(cfg)) == (47.62, -122.52)
+	assert grade._site_coords("Bainbridge", str(cfg)) == (47.0, -122.0)
 	assert grade._site_coords("UDRO", str(cfg)) == (38.0, -113.0)
 
 
@@ -206,7 +210,7 @@ def test_site_coords_missing_config_returns_none(tmp_path):
 
 def test_site_coords_unknown_site_returns_none(tmp_path):
 	cfg = tmp_path / "config.toml"
-	cfg.write_text('[[sites]]\nid = "Bainbridge"\nlat = 47.62\nlon = -122.52\n')
+	cfg.write_text('[[sites]]\nid = "Bainbridge"\nlat = 47.0\nlon = -122.0\n')
 	assert grade._site_coords("Mars", str(cfg)) == (None, None)
 
 
@@ -219,7 +223,7 @@ def test_site_coords_malformed_toml_returns_none(tmp_path):
 def test_site_coords_non_numeric_returns_none(tmp_path):
 	# Quoted coordinates (a real foot-gun) must not silently pass through as strings.
 	cfg = tmp_path / "config.toml"
-	cfg.write_text('[[sites]]\nid = "Bainbridge"\nlat = "47.62"\nlon = "-122.52"\n')
+	cfg.write_text('[[sites]]\nid = "Bainbridge"\nlat = "47.0"\nlon = "-122.0"\n')
 	assert grade._site_coords("Bainbridge", str(cfg)) == (None, None)
 
 

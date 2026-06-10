@@ -142,8 +142,10 @@ credits per site (60 credits/day for 3 sites, under the 100/day Pro budget) and
   never committed, contains the API key and per-site coordinates).
 - `~/.cache/astrowidget/state.json` — current forecast state, atomically
   rewritten by every fetcher run.
-- `~/.cache/astrowidget/state.prev.json` — prior state, for diff-based
-  notifications.
+- `~/.cache/astrowidget/state.prev.json` — rotation residue of the prior
+  state. (Since 2026-06-09, notifications diff against state.json read at the
+  START of the run; nothing reads the .prev file — it survives purely as the
+  write_state rotation artifact.)
 - `~/Claude/astrowidget/bin/astrowidget-score` — compiled Dart binary
   (gitignored; built from the astroplan source).
 

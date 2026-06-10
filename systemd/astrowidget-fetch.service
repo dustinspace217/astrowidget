@@ -3,6 +3,15 @@ Description=astrowidget Astrospheric + Open-Meteo fetcher
 Documentation=https://github.com/dustinspace217/astrowidget
 Wants=network-online.target
 After=network-online.target
+# Failure visibility (QA 2026-06-09): the fetcher self-notifies on its KNOWN
+# failure paths (config exit, scoring exit, per-site API errors), but an
+# unhandled traceback, an OOM-kill at MemoryMax=200M, or the TimeoutStartSec
+# SIGKILL all die before any notify code runs — landing silently in the
+# journal, with a stale widget icon hours later as the first human signal.
+# OnFailure is the backstop for exactly that uncovered set. %N = this unit's
+# name without the .service suffix (verified in systemd.unit(5) specifiers),
+# so the template instance reads "astrowidget-fetch", not "...service.service".
+OnFailure=astrowidget-failure@%N.service
 
 [Service]
 # Runs once per timer fire, then exits. The widget reads the resulting

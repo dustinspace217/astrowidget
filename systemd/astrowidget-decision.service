@@ -5,6 +5,9 @@ Documentation=https://github.com/dustinspace217/astrowidget
 # the session env (DISPLAY / WAYLAND_DISPLAY) on graphical login can launch it.
 After=graphical-session.target
 PartOf=graphical-session.target
+# Failure visibility backstop (QA 2026-06-09) — see astrowidget-failure@.service.
+# A crashed form means a silently-lost calibration night; surface it.
+OnFailure=astrowidget-failure@%N.service
 
 [Service]
 # NOT oneshot: the window persists until you answer (or close it), so the process

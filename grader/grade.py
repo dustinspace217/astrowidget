@@ -312,7 +312,7 @@ def _graded_keys(conn, site_id: str) -> set[tuple[str, str]]:
 	sweep skips these so it doesn't re-read a graded night's FITS over the network.
 	The DB UNIQUE constraint is the backstop if the dir-date pre-filter ever misses."""
 	rows = conn.execute(
-		"SELECT DISTINCT night_date, target FROM fits_grades WHERE site_id = ?",
+		"SELECT DISTINCT night_date, target FROM fits_grades WHERE site_id = ? COLLATE NOCASE",
 		(site_id,),
 	).fetchall()
 	return {(r[0], r[1]) for r in rows}
@@ -333,7 +333,10 @@ def _site_coords(site_id: str, config_path: str | None = None):
 	except (OSError, tomllib.TOMLDecodeError):
 		return None, None
 	for site in cfg.get("sites", []):
-		if site.get("id") == site_id:
+		# Case-insensitive id match (QA 2026-06-09): config ids are mixed-case
+		# and a casing drift here silently disabled dawn-exclusion (the lookup
+		# returned None,None and the grader "simply skips" by design).
+		if str(site.get("id", "")).lower() == site_id.lower():
 			lat, lon = site.get("lat"), site.get("lon")
 			if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
 				return float(lat), float(lon)

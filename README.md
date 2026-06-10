@@ -15,7 +15,7 @@ widget runs entirely on the free sources — see
 
 ## Status
 
-Pre-release. Built for personal use. The widget runs end-to-end on Fedora 43
+Pre-release. Built for personal use. The widget runs end-to-end on Fedora 44
 KDE Plasma 6 and may work on other Plasma 6 distributions without modification.
 
 ## Features

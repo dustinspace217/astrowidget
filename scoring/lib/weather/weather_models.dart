@@ -111,7 +111,12 @@ class HourlyWeather {
 		// cloudCover: 50% (unknown ≠ clear)
 		// humidity: 50% (unknown ≠ "perfectly dry" — was 0.0, which gave
 		//   falsely excellent humidity scores. Bug fix: GitHub #32)
-		// precipitationProbability: 50% (unknown ≠ no rain)
+		// precipitationProbability: NaN sentinel when absent (was 50% — that
+		//   pessimistic default predates the PEAK precip veto: under window
+		//   AVERAGING a 50 was a mild penalty, but under peak semantics one
+		//   missing hour exceeded a 10% home threshold and hard-vetoed a dry
+		//   night. NaN propagates the same skip-don't-fabricate convention as
+		//   temperature/dewpoint; _peakPrecipPct skips NaN hours. QA 2026-06-09)
 		// visibility: 10000m (reasonable median)
 		// temperature/dewpoint: both use NaN sentinel when absent, because
 		//   0.0/0.0 creates dew spread = 0 which triggers the condensation
@@ -129,7 +134,7 @@ class HourlyWeather {
 			windSpeed: (json['wind_speed_10m'] as num?)?.toDouble() ?? 0.0,
 			windGusts: (json['wind_gusts_10m'] as num?)?.toDouble() ?? 0.0,
 			precipitationProbability:
-				(json['precipitation_probability'] as num?)?.toDouble() ?? 50.0,
+				(json['precipitation_probability'] as num?)?.toDouble() ?? double.nan,
 			precipitation: (json['precipitation'] as num?)?.toDouble() ?? 0.0,
 			visibility: (json['visibility'] as num?)?.toDouble() ?? 10000.0,
 			// NO `?? 0.0`: null = "no jet data" (the seeing blend skips it); 0.0

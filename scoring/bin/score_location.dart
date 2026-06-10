@@ -91,6 +91,10 @@ const String _nbMethod = 'heuristic-reweight-v2';
 double _peakPrecipPct(List<HourlyWeather> hours) {
 	double peak = 0.0;
 	for (final h in hours) {
+		// NaN = "no data for this hour" (the fetcher stopped fabricating 50%
+		// for absent hours, QA 2026-06-09). Skip it — a missing reading must
+		// not raise the peak; NaN comparisons are false anyway, but be explicit.
+		if (h.precipitationProbability.isNaN) continue;
 		if (h.precipitationProbability > peak) {
 			peak = h.precipitationProbability;
 		}
@@ -107,6 +111,36 @@ VetoResult? _peakPrecipVeto(List<HourlyWeather> hours, double threshold) {
 			reason: 'Overnight rain chance peaks at ${peak.toStringAsFixed(0)}% '
 				'(exceeds your ${threshold.toStringAsFixed(0)}% limit) — keep the '
 				'scope covered.',
+		);
+	}
+	return null;
+}
+
+/// Peak-wind veto over the imaging window — deliberately NOT the engine's
+/// VetoEvaluator.checkWind, which AVERAGES wind across the window. Averaging
+/// is the exact structural flaw the 2026-06-03 cloud-gate incident exposed
+/// (a veto-class factor hiding inside a mean): a 2–3 h 60 km/h blow in an
+/// 8 h window averages under a 48 km/h dome-close threshold and reads green,
+/// while the iTelescope dome physically shuts mid-night (auto-close ~that
+/// speed) and a home scope shakes regardless of how calm the rest of the
+/// window was. Same pattern as _peakPrecipVeto above. (QA 2026-06-09.)
+///
+/// Missing hours carry windSpeed 0.0 (the neutral default) and simply cannot
+/// raise the peak. Gusts (windGusts) are fetched but deliberately NOT vetoed
+/// yet — sustained speed is the dome-close criterion; a separate gust
+/// threshold is a future, separately-configured refinement.
+VetoResult? _peakWindVeto(List<HourlyWeather> hours, double threshold) {
+	if (hours.isEmpty) return null;
+	var peak = 0.0;
+	for (final h in hours) {
+		if (h.windSpeed > peak) peak = h.windSpeed;
+	}
+	if (peak > threshold) {
+		return VetoResult(
+			vetoName: 'wind',
+			reason: 'Wind peaks at ${peak.toStringAsFixed(0)} km/h during the '
+				'window (exceeds your ${threshold.toStringAsFixed(0)} km/h limit) '
+				'— tracking and equipment safety at risk.',
 		);
 	}
 	return null;
@@ -440,10 +474,12 @@ Map<String, dynamic> _scoreOneNight({
 	// — a REMOTE dome is weatherproof and self-closes, so precip there is not an
 	// equipment threat (and a rainy night is already overcast → the cloud veto
 	// covers viability). This is the concrete HOME/REMOTE behavioural split.
+	// Wind uses a PEAK check (_peakWindVeto) rather than the engine's average,
+	// for the same reason precip does — see the veto's doc comment.
 	final VetoResult? firedVeto =
 		VetoEvaluator.checkCloud(loc.factorScores['cloud'] ?? 0) ??
 		(managed ? null : _peakPrecipVeto(exposureHours, precipMaxPct)) ??
-		VetoEvaluator.checkWind(windowHours, windMaxKmh) ??
+		_peakWindVeto(windowHours, windMaxKmh) ??
 		VetoEvaluator.checkCondensation(windowHours, dewSpreadMinC);
 	final vetoes = firedVeto == null
 		? const <Map<String, String>>[]
@@ -485,7 +521,14 @@ Map<String, dynamic> _scoreOneNight({
 		(loc.verdict == Verdict.excellent || loc.verdict == Verdict.good);
 	final nbPass = vetoes.isEmpty &&
 		(nbVerdict == Verdict.excellent || nbVerdict == Verdict.good);
-	final recommendation = bbPass && nbPass
+	// NB is physically never WORSE than BB: narrowband tolerates everything
+	// broadband does (it REJECTS the moonlight/LP that broadband needs gone),
+	// so BB-viable ⇒ NB-viable. The v2 NB re-weighting can still SCORE NB a
+	// few points below BB on a dark, poor-transparency night, which used to
+	// collapse a BB-passing night to 'Neither' — impossible physics (QA
+	// 2026-06-09). Floor the RECOMMENDATION on that implication; the displayed
+	// NB score itself stays un-floored and honest.
+	final recommendation = bbPass
 		? 'BB+NB'
 		: nbPass
 			? 'NB only'

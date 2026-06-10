@@ -18,6 +18,31 @@ sys.path.insert(0, str(PROJECT_ROOT / "fetcher"))
 
 
 @pytest.fixture(autouse=True)
+def _no_aod_network(request, monkeypatch):
+	"""Stub the Open-Meteo air-quality (AOD) fetch for EVERY test.
+
+	QA 2026-06-09: main() calls fetch_open_meteo_air_quality() once per site
+	and no main()-level test patched it — a bare `pytest tests/` fired 30+
+	LIVE HTTPS GETs at Open-Meteo. Best-effort + timeout meant the suite
+	passed even offline, which is exactly why it went unnoticed.
+
+	{} is the function's own documented absence value: build_air_quality_rows
+	maps it to "no transparency data" and the factor is OMITTED downstream
+	(the Phase-1 null-polarity rule) — so stubbed tests exercise the same
+	path as a real AOD outage. A test needing specific AOD data monkeypatches
+	over this (test-local patches apply after autouse ones); the one test
+	that exercises the REAL function opts out via @pytest.mark.real_aod
+	(registered in pytest.ini).
+	"""
+	if request.node.get_closest_marker("real_aod"):
+		return
+	import astrowidget_fetch
+	monkeypatch.setattr(
+		astrowidget_fetch, "fetch_open_meteo_air_quality", lambda lat, lon: {}
+	)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_calibration_db(tmp_path, monkeypatch):
 	"""Redirect the Phase-3 calibration DB to a per-test tmp path for EVERY test.
 

@@ -1,6 +1,8 @@
 [Unit]
 Description=astrowidget calibration-readiness check (Phase 3 Part 4 prep)
 Documentation=https://github.com/dustinspace217/astrowidget
+# Failure visibility backstop (QA 2026-06-09) — see astrowidget-failure@.service.
+OnFailure=astrowidget-failure@%N.service
 
 [Service]
 # Queries the calibration DB and, ONLY when there's enough joinable data (enough nights

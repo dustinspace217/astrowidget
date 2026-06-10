@@ -44,11 +44,16 @@ imaging-start reminder).
 - All code must pass `pre-commit` checks before commit (TBD: ruff for Python,
   high-entropy / lat-lon guard).
 
-## Privacy
-- The repo is intended for eventual public sharing; nothing personal ships.
-- `config.toml`, `state.json`, `notes/`, and `docs/superpowers/` are all
-  gitignored. The shipped artifact is `config.example.toml`, code, README,
-  LICENSE.
+## Privacy & Publication (repo is PUBLIC as of 2026-06)
+- **This repo is PUBLIC.** Astrospheric granted permission to distribute the
+  Astrospheric-integrated version publicly (2026-06). The old `astrowidget-pub`
+  fork (the no-Astrospheric variant) is obsolete/deprecated — do not port
+  changes to it or factor it into any decision.
+- Nothing personal ships: `config.toml`, `state.json`, `notes/`, and
+  `docs/superpowers/` are all gitignored. The shipped artifact is
+  `config.example.toml`, code, README, LICENSE.
+- Every commit is immediately world-readable: no API keys, no lat/lon-shaped
+  float pairs outside templates, synthetic coordinates only in tests.
 - Pre-commit hook (TBD) refuses commits containing API keys or lat/lon-shaped
   float pairs in non-template files.
 

@@ -478,3 +478,55 @@ def test_graceful_when_optional_feeds_absent():
 	assert 0 <= bb["score"] <= 100
 	assert "transparency" not in bb["factors"]   # omitted, not zeroed
 	assert "skyBrightness" in bb["factors"]       # always present (default baseline)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# "Tonight" anchoring (fix 2026-06-10) — Tonight = the in-progress-or-upcoming
+# night, NOT the night implied by nowUtc's UTC calendar date. The old anchoring
+# searched from noon UTC of nowUtc's own date, so any fetch between local
+# evening and the next UTC noon (17:00 PDT onward for a US-West site) labelled
+# TOMORROW's night "Tonight" — at 11 PM the widget's Tonight tab was the
+# following night. The binary takes now_utc from the payload, so these are
+# fully deterministic (no wall-clock rot).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _tonight_dark_start(now: datetime) -> str:
+	"""Tonight's dark-window start (ISO string) per the real binary at `now`."""
+	night = _run_binary(now, cloud=10.0, managed=False)
+	dw = night["dark_window"]
+	assert dw is not None, f"no dark window at {now} (test site has astro dark year-round)"
+	return dw["start"]
+
+@pytestmark_binary
+def test_tonight_is_stable_across_the_utc_date_roll():
+	"""A morning fetch and an evening fetch on the SAME local day must agree on
+	which night is "Tonight". For the lon -120 test site, 18:00 UTC = 11:00 local
+	(same UTC date) and 04:00 UTC next UTC-day = 21:00 local the SAME evening —
+	the old anchoring skipped a night at the second fetch."""
+	morning = _tonight_dark_start(datetime(2026, 6, 9, 18, 0, tzinfo=timezone.utc))
+	evening = _tonight_dark_start(datetime(2026, 6, 10, 4, 0, tzinfo=timezone.utc))
+	assert morning == evening, (
+		f"Tonight changed across the UTC date roll on one local evening: "
+		f"{morning} vs {evening}")
+
+@pytestmark_binary
+def test_tonight_rolls_after_the_night_ends_not_at_utc_midnight():
+	"""Once last night's dark window has ENDED (mid-morning local), Tonight must
+	advance to the upcoming night — exactly one night after the evening view."""
+	evening = _tonight_dark_start(datetime(2026, 6, 10, 4, 0, tzinfo=timezone.utc))
+	next_morning = _tonight_dark_start(datetime(2026, 6, 10, 18, 0, tzinfo=timezone.utc))
+	d1 = datetime.fromisoformat(evening.replace("Z", "+00:00"))
+	d2 = datetime.fromisoformat(next_morning.replace("Z", "+00:00"))
+	delta_h = (d2 - d1).total_seconds() / 3600
+	assert 22 <= delta_h <= 26, (
+		f"expected Tonight to advance exactly one night after dawn, got {delta_h:.1f} h")
+
+@pytestmark_binary
+def test_tonight_window_is_in_progress_or_future_at_late_evening():
+	"""At 23:00 local (06:00 UTC for lon -120), Tonight's dark window must not
+	already be over — its END is after `now`. This is the decision-form moment:
+	the verdict on screen at 11 PM must describe the night being decided."""
+	now = datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc)
+	night = _run_binary(now, cloud=10.0, managed=False)
+	end = datetime.fromisoformat(night["dark_window"]["end"].replace("Z", "+00:00"))
+	assert end > now, f"Tonight's window already ended at {end} (now {now})"

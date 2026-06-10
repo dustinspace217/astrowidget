@@ -321,11 +321,36 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 		airQuality: airQuality,
 	);
 
-	// Score the next three nights.  "Tonight" = the next astro dark window
-	// after nowUtc.  +1 / +2 are the windows on subsequent dates.
+	// Score the next three nights.  "Tonight" = the night whose astro dark
+	// window is in progress or next upcoming — NOT the night implied by the
+	// UTC calendar date of nowUtc. astronomicalDarkWindow(date) searches from
+	// noon UTC on `date`, so anchoring on nowUtc's own UTC date skips the
+	// imminent night whenever the fetch lands between local evening and the
+	// next UTC noon: at 17:10 PDT the UTC date has already rolled, and
+	// "Tonight" silently became TOMORROW (the widget's Tonight tab at 11 PM
+	// showed the following night; found 2026-06-10). Eastern-longitude sites
+	// had the mirror-image skew. The anchor below starts one day EARLY and
+	// advances past nights that are already over, judged by each candidate's
+	// own dark-window END against nowUtc — which is longitude-correct because
+	// the window itself is.
+	var anchor = nowUtc.subtract(const Duration(days: 1));
+	// Bounded: at most 2 advances (yesterday → today → tomorrow). A night is
+	// "over" when its dark window has ended at/before nowUtc; a night with NO
+	// dark window (e.g. high-latitude midsummer) uses the search range's end
+	// (noon UTC the next day) as a proxy so the advance never stalls on it.
+	for (int i = 0; i < 2; i++) {
+		final w = astronomicalDarkWindow(anchor, latitude: lat, longitude: lon);
+		final nightOver = w.end != null
+			? !w.end!.isAfter(nowUtc)
+			: !DateTime.utc(anchor.year, anchor.month, anchor.day, 12)
+				.add(const Duration(days: 1)).isAfter(nowUtc);
+		if (!nightOver) break;
+		anchor = anchor.add(const Duration(days: 1));
+	}
+
 	final nights = <Map<String, dynamic>>[];
 	for (int offset = 0; offset < 3; offset++) {
-		final referenceDate = nowUtc.add(Duration(days: offset));
+		final referenceDate = anchor.add(Duration(days: offset));
 		nights.add(_scoreOneNight(
 			referenceDate: referenceDate,
 			label: ['Tonight', '+1 night', '+2 nights'][offset],

@@ -269,10 +269,24 @@ DarkWindow _sunCrossingWindow(
 	);
 
 	// Morning: Sun is ascending (direction = +1.0) through the target boundary.
-	// We search from the start time if found, otherwise from searchStart.
-	// This avoids accidentally finding the previous morning's crossing.
+	// We search from just AFTER the evening crossing if found, otherwise from
+	// searchStart. This avoids accidentally finding the previous morning's
+	// crossing.
+	//
+	// The search is seeded 5 minutes AFTER the evening crossing, not AT it.
+	// geoengine refines crossings to a 0.1 s time tolerance, so the returned
+	// evening instant can sit a hair past the true root — the altitude function
+	// is then zero-within-noise at the seed, and the ascending root-finder
+	// "converges" immediately, returning a degenerate end ≈ start + 1 ms.
+	// Bainbridge (47.6°N) hit exactly this near the June solstice, where the
+	// Sun grazes -18° at a shallow angle and the noise band is widest: the
+	// 2026-06-10/11 night computed a 0-minute dark window while its neighbours
+	// were ~120 min (found 2026-06-09; same bug exists in astroplan upstream).
+	// 5 min is ~3000× the refinement tolerance, and only sacrifices windows
+	// shorter than 5 minutes — which have no imaging value anyway (the guard
+	// below converts that razor case into an honest "no dark window").
 	final morningSearchStart = startCrossing != null
-		? _toUtc(startCrossing)
+		? _toUtc(startCrossing).add(const Duration(minutes: 5))
 		: searchStart;
 
 	final endCrossing = geo.searchAltitude(
@@ -284,10 +298,51 @@ DarkWindow _sunCrossingWindow(
 		targetAltitudeDeg,
 	);
 
-	return DarkWindow(
-		start: startCrossing != null ? _toUtc(startCrossing) : null,
-		end: endCrossing != null ? _toUtc(endCrossing) : null,
-	);
+	final start = startCrossing != null ? _toUtc(startCrossing) : null;
+	var end = endCrossing != null ? _toUtc(endCrossing) : null;
+
+	// Sanity guard: if the night's true window was shorter than the 5-minute
+	// seed offset (possible only in a razor band of latitudes where the Sun
+	// grazes just below the target at solstice), the morning search starts
+	// AFTER the real dawn and finds the NEXT night's crossing instead —
+	// fabricating a ~24 h "window" that contains an entire day.
+	//
+	// The artifact is detected by SIGNATURE, not duration: at the midpoint of
+	// a genuine window the Sun is below the target altitude (that's what the
+	// window means), while the wraparound artifact straddles local noon, where
+	// the Sun is far above it. A duration threshold cannot do this job — this
+	// helper also serves horizonWindow (0°), and genuine sunset→sunrise nights
+	// at ~63–66.5°N legitimately run 20–23.4 h in winter, overlapping any cut
+	// that would also catch the ~23.9 h artifact (caught in the 2026-06-09
+	// review of this fix). One extra altitude sample, valid at every latitude
+	// and for both callers. The margin is degrees, so refraction nuances are
+	// irrelevant here.
+	if (start != null && end != null) {
+		final mid = start.add(
+			Duration(milliseconds: end.difference(start).inMilliseconds ~/ 2));
+		if (_sunAltitudeDeg(mid, observer) > targetAltitudeDeg) {
+			// end stays the wraparound crossing only in the artifact case; start
+			// is kept (it IS the genuine evening crossing) and end alone is
+			// nulled — deliberate asymmetry, so callers see "dusk happened, no
+			// usable window" rather than "no night at all".
+			end = null;
+		}
+	}
+
+	return DarkWindow(start: start, end: end);
+}
+
+/// The Sun's altitude in degrees at [timeUtc] for [observer] (airless — no
+/// refraction — matching the metric geoengine's altitude search itself uses).
+/// Used by _sunCrossingWindow's wraparound guard, where the decision margin is
+/// whole degrees, so frame/refraction subtleties don't matter.
+double _sunAltitudeDeg(DateTime timeUtc, geo.Observer observer) {
+	// Of-date equatorial coordinates of the Sun, then convert to horizontal
+	// (alt/az) at this instant and location — the same two-step geoengine's
+	// internal altitude function performs.
+	final eq = geo.equator(geo.Body.Sun, timeUtc, observer, true, true);
+	final hor = geo.HorizontalCoordinates.horizon(timeUtc, observer, eq.ra, eq.dec);
+	return hor.altitude;
 }
 
 /// Generates an altitude curve for a fixed sky target over one night.

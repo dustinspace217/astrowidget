@@ -118,19 +118,36 @@ def main() -> int:
 					help="distinct condition bands needed (clear/marginal/cloudy; default 3)")
 	ap.add_argument("--notify", action="store_true",
 					help="fire a desktop notification ONLY when ready (for the weekly timer)")
+	ap.add_argument("--all", action="store_true",
+					help="assess EVERY configured site (remote-site calibration "
+						 "2026-06-10). Remote sites join forecasts to FITS grades only "
+						 "— no decision form there, so their dataset is imaged nights; "
+						 "that calibrates factor accuracy, not the go/no-go threshold.")
 	args = ap.parse_args()
 
 	conn = cl.connect()
 	try:
-		a = assess(conn, args.site, args.min_nights, args.min_bands)
+		if args.all:
+			# Sibling module; _config_sites reads the same gitignored config the
+			# fetcher uses, so the site list needs no flags and carries no coords
+			# into this unit. Falls back to the single --site if config is absent.
+			import grade
+			site_ids = [s["id"] for s in grade._config_sites()] or [args.site]
+		else:
+			site_ids = [args.site]
+		assessments = [assess(conn, s, args.min_nights, args.min_bands)
+					   for s in site_ids]
+		a = assessments[0]
 		# Unanswered-decision backlog (QA 2026-06-09): the nightly form drains
 		# ONE night per open, so an away stretch accumulates pending nights at
 		# zero-per-day net — and a stalled labeling loop previously looked
-		# identical to healthy thin data in this report.
+		# identical to healthy thin data in this report. Decision tracking is
+		# HOME-site-only by design, so this is keyed to --site even under --all.
 		pending = cl.pending_nights(conn, args.site)
 	finally:
 		conn.close()
-	print(format_report(a))
+	for one in assessments:
+		print(format_report(one))
 	if pending:
 		# pending_nights caps at limit=14 — print "14+" at the cap so a
 		# 30-night backlog doesn't masquerade as exactly 14 (QA 2026-06-09).
@@ -162,10 +179,13 @@ def main() -> int:
 					f"astrowidget: notify-send exited {proc.returncode} — "
 					f"{title}: {body}\n")
 
-		if a["ready"]:
+		ready = [one for one in assessments if one["ready"]]
+		if ready:
 			# Only pings when ready, so the weekly timer is silent until it matters.
+			# One ping covering every ready site (not one per site — no ping storms).
+			names = ", ".join(one["site"] for one in ready)
 			_ping("astrowidget: calibration data ready",
-				  f"{a['n']} joinable nights across {len(a['bands'])} conditions — "
+				  f"{names}: enough joinable nights across enough conditions — "
 				  "reload astrowidget and ask Claude for a re-tune.")
 		elif len(pending) >= 5:
 			# Stalled-labeling nudge (QA 2026-06-09): >=5 unanswered nights is a

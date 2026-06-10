@@ -245,6 +245,78 @@ def test_two_rigs_same_target_do_not_overwrite(tmp_path, recorded):
 	assert n == 2  # both rigs persisted, neither overwritten
 
 
+# ---- header-coordinate site attribution (remote-site calibration 2026-06-10) ----
+
+_SITES = [
+	{"id": "Bainbridge", "lat": 47.62, "lon": -122.5},
+	{"id": "SRO", "lat": 37.07, "lon": -119.4},
+	{"id": "UDRO", "lat": 37.74, "lon": -113.7},
+]
+
+
+def test_nearest_site_matches_within_tolerance():
+	# Header coords a few hundredths of a degree off (header rounding) still match.
+	assert grade._nearest_site(47.6167, -122.502, _SITES)["id"] == "Bainbridge"
+	assert grade._nearest_site(37.0703, -119.4131, _SITES)["id"] == "SRO"
+
+
+def test_nearest_site_rejects_far_coordinates():
+	# A site not in the config (e.g. Siding Spring) must NOT fuzzy-match anything.
+	assert grade._nearest_site(-31.27, 149.07, _SITES) is None
+
+
+def test_sweep_attributes_sessions_by_header_coords(tmp_path, monkeypatch):
+	"""Attribution mode: two sessions from different sites (per their header coords)
+	land under their own site_ids — the home/remote mislabeling bug stays dead."""
+	night = _offset(1)
+	_make_session(tmp_path, "M81", night, rig="Eon 70")
+	_make_session(tmp_path, "Caldwell 5", night, rig="T68")
+	coords = {"Eon 70": (47.6167, -122.502), "T68": (37.7378, -113.6975)}
+
+	def _fake_read_sub(p, k=5.0):
+		rig = next(r for r in coords if r in str(p))
+		la, lo = coords[rig]
+		return _sub("2026-06-09T08:00:00", 1000, path=str(p)) | {
+			"lat_obs": la, "lon_obs": lo}
+
+	monkeypatch.setattr(grade.fm, "read_sub", _fake_read_sub)
+	written = grade.grade_pending(str(tmp_path), sites=_SITES)
+	by_site = {g["site_id"]: g["target"] for g in written}
+	assert by_site == {"Bainbridge": "M81 / Eon 70", "UDRO": "Caldwell 5 / T68"}
+
+
+def test_sweep_skips_unattributable_sessions(tmp_path, monkeypatch):
+	"""No header coords (or no config match) → skipped loudly, never guessed."""
+	_make_session(tmp_path, "M81", _offset(1), rig="Mystery")
+	monkeypatch.setattr(
+		grade.fm, "read_sub",
+		lambda p, k=5.0: _sub("2026-06-09T08:00:00", 1000, path=str(p)))  # no lat_obs
+	written = grade.grade_pending(str(tmp_path), sites=_SITES)
+	assert written == []
+	conn = cl.connect()
+	try:
+		n = conn.execute("SELECT COUNT(*) FROM fits_grades").fetchone()[0]
+	finally:
+		conn.close()
+	assert n == 0
+
+
+def test_sweep_attribution_skip_check_is_site_agnostic(tmp_path, monkeypatch):
+	"""A night+target already graded under its site is skipped WITHOUT re-reading
+	headers (the done-check covers all sites in attribution mode)."""
+	night = _offset(1)
+	_make_session(tmp_path, "Caldwell 5", night, rig="T68")
+	grade._write_grades(_canned_grade(str(tmp_path / "Caldwell 5" / "T68" / night),
+									  target="Caldwell 5 / T68"), "UDRO")
+
+	def _boom(p, k=5.0):  # any header read would mean the skip-check failed
+		raise AssertionError("read_sub called for an already-graded session")
+
+	monkeypatch.setattr(grade.fm, "read_sub", _boom)
+	written = grade.grade_pending(str(tmp_path), sites=_SITES)
+	assert written == []
+
+
 def test_rigs_filter_grades_only_home_rig(tmp_path, recorded):
 	"""rigs={...} restricts the sweep to a site's own rigs, so iTelescope rentals in
 	the same Raws/ tree aren't graded under the home site (the real-world bug)."""

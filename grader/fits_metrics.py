@@ -81,6 +81,9 @@ def read_sub(path: str, k: float = 5.0) -> dict[str, Any]:
 	    imagetyp   — frame type from the header (NINA: 'LIGHT'/'FLAT'/'DARK'/'BIAS'/
 	                 'DARKFLAT'), or None. The grader uses this to skip calibration
 	                 frames when a session folder co-locates them with lights.
+	    lat_obs    — capture-site latitude in decimal degrees (LAT-OBS, or numeric
+	                 SITELAT), or None. Used to attribute the session to a site.
+	    lon_obs    — capture-site longitude in decimal degrees, same sources.
 	    moonangl   — moon–target separation in degrees (header), or None
 	    exptime    — exposure seconds, or None
 	    median_bg  — median background level
@@ -98,10 +101,27 @@ def read_sub(path: str, k: float = 5.0) -> dict[str, Any]:
 	moonangl = header.get("MOONANGL")
 	exptime = header.get("EXPTIME")
 	imagetyp = header.get("IMAGETYP")
+
+	# Site coordinates of the capture location — the ground truth the auto-grader
+	# uses to attribute a session to a configured site (remote-site calibration,
+	# 2026-06-10). Two header dialects cover both capture stacks in the library:
+	# iTelescope writes decimal LAT-OBS/LONG-OBS (its SITELAT is a sexagesimal
+	# STRING); NINA writes numeric SITELAT/SITELONG. Prefer LAT-OBS, fall back to
+	# a NUMERIC SITELAT — never parse the sexagesimal strings (the decimal twin
+	# is always present alongside them).
+	def _coord(primary: str, fallback: str) -> float | None:
+		v = header.get(primary)
+		if isinstance(v, (int, float)):
+			return float(v)
+		v = header.get(fallback)
+		return float(v) if isinstance(v, (int, float)) else None
+
 	return {
 		"date_obs": header.get("DATE-OBS"),
 		"filter": _filter_from(header, path),
 		"imagetyp": imagetyp.strip() if isinstance(imagetyp, str) else None,
+		"lat_obs": _coord("LAT-OBS", "SITELAT"),
+		"lon_obs": _coord("LONG-OBS", "SITELONG"),
 		"moonangl": float(moonangl) if isinstance(moonangl, (int, float)) else None,
 		"exptime": float(exptime) if isinstance(exptime, (int, float)) else None,
 		"median_bg": median_background(data),

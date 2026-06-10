@@ -17,14 +17,15 @@ OnFailure=astrowidget-grade-failure.service
 # Runs once per timer fire, then exits (like the fetcher). It walks last night's
 # session folders, grades the not-yet-graded ones, writes fits_grades, and stops.
 Type=oneshot
-# --scan: sweep the Raws/ tree and grade every complete, ungraded night within the
-# lookback window. --rig "Eon 70" restricts grading to the home scope — Raws/ also
-# holds iTelescope rentals (T24/T26/…), which must NOT be logged as Bainbridge.
-# Coordinates for dawn-exclusion are read from the gitignored config.toml at runtime
-# (so no lat/lon is baked into this unit). --since-days defaults to 30; the first run
-# after a long gap can backfill more with a manual
-#   python3 grader/grade.py --scan <root> --site Bainbridge --rig "Eon 70" --since-days 0 --write
-ExecStart=/usr/bin/python3 %h/Claude/astrowidget/grader/grade.py --scan /mnt/vaultinspace/Astrophotography/Raws --site Bainbridge --rig "Eon 70" --write
+# --scan with NO --site: automatic per-session site attribution (remote-site
+# calibration, 2026-06-10). Each session's FITS header coordinates are matched to
+# the nearest configured site, so home (Eon 70 → Bainbridge) AND iTelescope rentals
+# (T24 → SRO, T68 → UDRO, …) each land under their TRUE site_id; unattributable
+# sessions are skipped loudly. Coordinates come from headers + the gitignored
+# config.toml at runtime (none are baked into this unit). --since-days defaults to
+# 30; backfill more with a manual run:
+#   python3 grader/grade.py --scan <root> --since-days 0 --write
+ExecStart=/usr/bin/python3 %h/Claude/astrowidget/grader/grade.py --scan /mnt/vaultinspace/Astrophotography/Raws --write
 StandardOutput=journal
 StandardError=journal
 # Reads one sub into memory at a time (read_sub returns scalar metrics, not the pixel

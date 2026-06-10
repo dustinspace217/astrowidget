@@ -9,7 +9,8 @@ OnFailure=astrowidget-failure@%N.service
 # across enough condition bands), fires a desktop notification telling you it's time to
 # ask for a re-tune. Silent every other week — no nag while the data is still thin.
 Type=oneshot
-ExecStart=/usr/bin/python3 %h/Claude/astrowidget/grader/calibration_readiness.py --site Bainbridge --notify
+# --all: every configured site (remote sites join forecasts to FITS grades only).
+ExecStart=/usr/bin/python3 %h/Claude/astrowidget/grader/calibration_readiness.py --all --site Bainbridge --notify
 StandardOutput=journal
 StandardError=journal
 # A pure DB query — no NAS, no heavy compute.

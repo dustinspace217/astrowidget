@@ -314,7 +314,12 @@ def _graded_keys(conn, site_id: str) -> set[tuple[str, str]]:
 	rows = conn.execute(
 		"SELECT DISTINCT night_date, target FROM fits_grades WHERE site_id = ? COLLATE NOCASE",
 		(site_id,),
-	).fetchall()
+	).fetchall() if site_id is not None else conn.execute(
+		# site_id None = attribution mode: keys across ALL sites. Valid because
+		# target embeds the rig and a rig is physically at one site, so the
+		# (night_date, target) pair is globally unique — and site-agnostic
+		# checking avoids re-reading headers for already-graded sessions.
+		"SELECT DISTINCT night_date, target FROM fits_grades").fetchall()
 	return {(r[0], r[1]) for r in rows}
 
 
@@ -343,18 +348,94 @@ def _site_coords(site_id: str, config_path: str | None = None):
 	return None, None
 
 
+def _config_sites(config_path: str | None = None) -> list[dict[str, Any]]:
+	"""All configured sites as [{id, lat, lon}], from the same gitignored
+	config.toml the fetcher reads. Sites without numeric coords are omitted (they
+	can't be matched against header coordinates). Empty list when the config is
+	absent/unreadable — the sweep then can't attribute and skips loudly."""
+	import tomllib  # stdlib (3.11+); read-only parse of the user's config
+	cfg_path = Path(config_path) if config_path else (
+		Path.home() / ".config" / "astrowidget" / "config.toml")
+	try:
+		with cfg_path.open("rb") as f:
+			cfg = tomllib.load(f)
+	except (OSError, tomllib.TOMLDecodeError):
+		return []
+	sites = []
+	for site in cfg.get("sites", []):
+		lat, lon = site.get("lat"), site.get("lon")
+		if site.get("id") and isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+			sites.append({"id": str(site["id"]), "lat": float(lat), "lon": float(lon)})
+	return sites
+
+
+def _nearest_site(lat: float, lon: float,
+				  sites: list[dict[str, Any]], tol_deg: float = 0.25) -> dict[str, Any] | None:
+	"""The configured site whose coordinates match (lat, lon) within [tol_deg],
+	or None when nothing is close enough.
+
+	The remote-site attribution core (2026-06-10): each session's FITS headers
+	carry the capture site's decimal coordinates, so matching them to the config
+	beats any hand-maintained rig→site table — iTelescope relocates and renumbers
+	scopes (T26 moved to UDRO at some point), and the header records where the
+	sub was ACTUALLY shot. 0.25° (~25 km) is generous against header rounding yet
+	unambiguous: the closest configured pair (the two Spanish sites) is ~4° apart.
+	Chebyshev distance (max of the axis deltas) is sufficient at this tolerance —
+	no great-circle math needed."""
+	best, best_d = None, tol_deg
+	for s in sites:
+		d = max(abs(s["lat"] - lat), abs(s["lon"] - lon))
+		if d <= best_d:
+			best, best_d = s, d
+	return best
+
+
+def _attribute_session(session_dir: str | Path,
+					   sites: list[dict[str, Any]]) -> dict[str, Any] | None:
+	"""Match a session folder to a configured site via its FITS header coordinates.
+
+	Reads ONE sub (the first readable) — every sub in a session shares the capture
+	site, so one header decides it. Returns the matched site dict ({id, lat, lon}),
+	or None when the session has no readable sub, the capture stack wrote no
+	coordinates, or the coordinates match no configured site. The caller skips
+	unattributed sessions LOUDLY — guessing a site would poison the calibration
+	join, which is the exact mislabeling bug this mechanism replaced."""
+	for p in sorted(Path(session_dir).rglob("*.fit*")):
+		try:
+			sub = fm.read_sub(str(p))
+		except Exception:  # noqa: BLE001 — unreadable file: try the next sub
+			continue
+		la, lo = sub.get("lat_obs"), sub.get("lon_obs")
+		if la is None or lo is None:
+			return None  # the whole session's stack writes no coords; don't guess
+		return _nearest_site(la, lo, sites)
+	return None
+
+
 def grade_pending(
 	raws_root: str, site_id: str = "Bainbridge",
 	lat: float | None = None, lon: float | None = None, write: bool = True,
 	since_days: int = 30, rigs: set[str] | None = None,
+	sites: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
 	"""Scan raws_root and grade every COMPLETE, not-yet-graded session folder.
 
-	The auto-grader's entry point (a systemd timer calls this each morning). Skips:
+	The auto-grader's entry point (a systemd timer calls this each morning).
+
+	Two attribution modes:
+	  - `sites` given (the timer's default, remote-site calibration 2026-06-10):
+	    each session is attributed to a configured site by matching its FITS
+	    header coordinates (_attribute_session) — home AND iTelescope sessions
+	    all land under their TRUE site_id, with that site's coords driving
+	    dawn-exclusion. Sessions that can't be attributed are skipped loudly.
+	    site_id/lat/lon are ignored in this mode.
+	  - `sites` None: every graded session is stamped with the fixed site_id
+	    (+ lat/lon for dawn-exclusion) — the legacy single-site mode, kept for
+	    explicit `--site` runs and tests.
+
+	Skips:
 	  - other rigs: when `rigs` is given, only sessions whose <Rig> folder is in the set
-	    are graded. Raws/ mixes the home scope with iTelescope rentals, and the site
-	    label would otherwise be stamped on remote data — so the home-site sweep passes
-	    its own rig(s) (e.g. {"Eon 70"}) and the T-number rentals are skipped.
+	    are graded (an additional filter, orthogonal to attribution).
 	  - tonight / future: a folder whose date is >= today's local date — imaging
 	    isn't done. (The timer runs mid-morning, after dawn, so "today's" folder is
 	    either tonight's not-yet-started session or still being written; either way
@@ -385,7 +466,8 @@ def grade_pending(
 
 	conn = cl.connect()
 	try:
-		done = _graded_keys(conn, site_id)
+		# Attribution mode checks (night, target) across ALL sites — see _graded_keys.
+		done = _graded_keys(conn, None if sites is not None else site_id)
 	finally:
 		conn.close()
 
@@ -393,6 +475,7 @@ def grade_pending(
 	seen = 0
 	skipped_old = 0
 	skipped_rig = 0
+	skipped_unattributed = 0
 	for session_dir, target, rig, dir_date in _session_dirs(raws_root):
 		seen += 1
 		if rigs is not None and rig not in rigs:
@@ -405,18 +488,30 @@ def grade_pending(
 			continue  # older than the lookback window
 		if (dir_date, target) in done:
 			continue  # already graded this night + target
+		# Which site is this session's data FROM? In attribution mode the session's
+		# own header coordinates decide; in fixed mode the caller's site_id does.
+		g_site, g_lat, g_lon = site_id, lat, lon
+		if sites is not None:
+			match = _attribute_session(session_dir, sites)
+			if match is None:
+				skipped_unattributed += 1
+				sys.stderr.write(
+					f"grader: cannot attribute {target} {dir_date} to a configured site "
+					f"(no readable header coordinates, or none match) — skipped\n")
+				continue
+			g_site, g_lat, g_lon = match["id"], match["lat"], match["lon"]
 		try:
-			grades = grade_session(str(session_dir), site_id, lat, lon, target=target)
+			grades = grade_session(str(session_dir), g_site, g_lat, g_lon, target=target)
 		except Exception as e:  # noqa: BLE001 — one bad session shouldn't sink the sweep
 			sys.stderr.write(f"grader: skipping {session_dir} ({e})\n")
 			continue
 		if not grades:
 			continue
 		if write:
-			_write_grades(grades, site_id)
+			_write_grades(grades, g_site)
 		written.extend(grades)
 		sys.stderr.write(
-			f"grader: graded {target} {dir_date} — {len(grades)} group(s)\n")
+			f"grader: graded {target} {dir_date} -> {g_site} — {len(grades)} group(s)\n")
 	# Always summarize what was swept. "swept 0 dirs" makes an empty / unreachable tree
 	# visible in the journal instead of looking like a quiet idle morning (main() also
 	# exits non-zero up front when the root isn't a readable directory at all).
@@ -426,6 +521,10 @@ def grade_pending(
 		sys.stderr.write(
 			f"grader: skipped {skipped_rig} session(s) from rigs not in {sorted(rigs)} "
 			f"(remote rentals etc.)\n")
+	if skipped_unattributed:
+		sys.stderr.write(
+			f"grader: skipped {skipped_unattributed} session(s) that could not be "
+			f"attributed to a configured site — check header coords / config sites\n")
 	if skipped_old:
 		# Surface the bound rather than hiding it — a future run can backfill with
 		# --since-days 0 if these older nights are wanted.
@@ -444,7 +543,11 @@ def main() -> int:
 					help="auto-grader sweep: walk a Raws/ tree and grade every "
 						 "complete, not-yet-graded night (idempotent). This is what "
 						 "the systemd timer runs each morning.")
-	ap.add_argument("--site", default="Bainbridge")
+	ap.add_argument("--site", default=None,
+					help="fix every grade to this site id. For --scan, OMITTING it "
+						 "enables automatic per-session site attribution from FITS "
+						 "header coordinates (the timer's mode); single-folder mode "
+						 "defaults to Bainbridge.")
 	ap.add_argument("--lat", type=float, default=None, help="site latitude (for dawn-exclusion)")
 	ap.add_argument("--lon", type=float, default=None, help="site longitude (for dawn-exclusion)")
 	ap.add_argument("--write", action="store_true",
@@ -473,21 +576,37 @@ def main() -> int:
 		# (dawn-exclusion needs both), so reject it rather than drop it.
 		if (args.lat is None) != (args.lon is None):
 			ap.error("pass BOTH --lat and --lon, or neither (dawn-exclusion needs both)")
-		# Resolve dawn-exclusion coords from the gitignored config (so the committed
-		# systemd unit names none) unless explicitly overridden on the CLI.
-		lat, lon = args.lat, args.lon
-		if lat is None and lon is None:
-			lat, lon = _site_coords(args.site)
-		if lat is None or lon is None:
-			# No coords → dawn-exclusion is OFF. Surface it: a clear night that fades at
-			# dawn will misclassify as gradual-cloud, polluting the calibration set.
-			# (Each such grade is also stamped in fits_grades.notes.)
-			sys.stderr.write(
-				f"grader: no coordinates for site {args.site!r} — dawn-exclusion DISABLED; "
-				f"dawn-fade nights may misclassify as gradual-cloud.\n")
-		written = grade_pending(args.scan, args.site, lat, lon,
-								write=args.write, since_days=args.since_days,
-								rigs=set(args.rig) if args.rig else None)
+		if args.site is None:
+			# Attribution mode (the timer's default): per-session site from FITS
+			# header coordinates matched against the configured sites. Needs the
+			# config to know the sites — fail loud if it yields nothing.
+			cfg_sites = _config_sites()
+			if not cfg_sites:
+				sys.stderr.write(
+					"grader: no configured sites with coordinates (config.toml missing "
+					"or unreadable) — cannot attribute sessions; nothing swept.\n")
+				return 1
+			written = grade_pending(args.scan,
+									write=args.write, since_days=args.since_days,
+									rigs=set(args.rig) if args.rig else None,
+									sites=cfg_sites)
+		else:
+			# Fixed-site mode (explicit --site): every grade stamped with that id.
+			# Resolve dawn-exclusion coords from the gitignored config (so the
+			# committed systemd unit names none) unless overridden on the CLI.
+			lat, lon = args.lat, args.lon
+			if lat is None and lon is None:
+				lat, lon = _site_coords(args.site)
+			if lat is None or lon is None:
+				# No coords → dawn-exclusion is OFF. Surface it: a clear night that
+				# fades at dawn will misclassify as gradual-cloud, polluting the
+				# calibration set. (Each such grade is also stamped in notes.)
+				sys.stderr.write(
+					f"grader: no coordinates for site {args.site!r} — dawn-exclusion "
+					f"DISABLED; dawn-fade nights may misclassify as gradual-cloud.\n")
+			written = grade_pending(args.scan, args.site, lat, lon,
+									write=args.write, since_days=args.since_days,
+									rigs=set(args.rig) if args.rig else None)
 		if not written:
 			print("Auto-grader: no new complete nights to grade.")
 			return 0
@@ -499,10 +618,12 @@ def main() -> int:
 			print(f"(dry run — {len(written)} grade(s) NOT written; pass --write)")
 		return 0
 
-	# Single-folder mode (manual grade of one session).
+	# Single-folder mode (manual grade of one session). --site keeps its historic
+	# Bainbridge default here — manual one-folder grades are the home-site remedy
+	# path (e.g. correcting a partial night), not the multi-site sweep.
 	if not args.folder:
 		ap.error("provide a session folder, or use --scan RAWS_ROOT")
-	grades = grade_session(args.folder, args.site, args.lat, args.lon)
+	grades = grade_session(args.folder, args.site or "Bainbridge", args.lat, args.lon)
 	if not grades:
 		print("No FITS subs found under", args.folder)
 		return 1

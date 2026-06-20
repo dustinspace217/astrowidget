@@ -130,6 +130,12 @@ CREATE TABLE IF NOT EXISTS fits_grades (
     bg_median         REAL,
     transition_class  TEXT,          -- 'stable' / 'gradual-cloud' / 'sudden-artifact' / 'dawn'
     notes             TEXT,
+    dir_date          TEXT,           -- the session FOLDER's date name; the skip pre-filter
+                                      -- keys on it (a remote site's folder date differs from
+                                      -- the Pacific-computed night_date) — DEF-3b-02.
+    source_file_count INTEGER,        -- total FITS files in the folder when graded; the sweep
+                                      -- re-grades a night whose folder has GROWN past it, so a
+                                      -- partial grade (robocopy still flushing) self-heals — DEF-3b-01.
     -- One grade per night+site+target+filter, so re-grading a night (the daily
     -- sweep, or a manual re-run) REPLACES rather than duplicates.
     UNIQUE(night_date, site_id, target, filter)
@@ -164,21 +170,33 @@ _EXPECTED_DF_KEYS = frozenset({
 })
 
 
+# Columns ADD-ed to an existing `fits_grades` table (same reasoning as the forecast
+# columns above). dir_date + source_file_count back DEF-3b-02 + DEF-3b-01; both are
+# NULL on rows graded before the columns existed, which the grader treats as "unknown"
+# (skip the growth check, fall back to night_date for the skip key).
+_GRADES_ADDED_COLUMNS = [
+	("dir_date", "TEXT"),
+	("source_file_count", "INTEGER"),
+]
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
-	"""Add any missing forecast raw-reading columns to a pre-existing DB. A fresh DB
-	already has them from _SCHEMA; this catches a DB created before they were added.
-	PRAGMA table_info lists the current columns, so ALTER runs only for the missing
-	ones — idempotent, and it never touches existing rows (they stay NULL there)."""
-	existing = {row[1] for row in conn.execute("PRAGMA table_info(forecasts)")}
-	for name, col_type in _FORECAST_RAW_COLUMNS:
-		if name not in existing:
-			try:
-				conn.execute(f"ALTER TABLE forecasts ADD COLUMN {name} {col_type}")
-			except sqlite3.OperationalError as e:
-				# Name the migration + the offending column, so a caller's log doesn't
-				# show an opaque "DB open failed" that has to be reverse-engineered.
-				raise sqlite3.OperationalError(
-					f"calibration migration failed adding forecasts.{name}: {e}") from e
+	"""Add any missing columns to a pre-existing DB. A fresh DB already has them from
+	_SCHEMA; this catches a DB created before they were added. PRAGMA table_info lists
+	the current columns, so ALTER runs only for the missing ones — idempotent, and it
+	never touches existing rows (they stay NULL there)."""
+	for table, cols in (("forecasts", _FORECAST_RAW_COLUMNS),
+						("fits_grades", _GRADES_ADDED_COLUMNS)):
+		existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+		for name, col_type in cols:
+			if name not in existing:
+				try:
+					conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
+				except sqlite3.OperationalError as e:
+					# Name the migration + the offending column, so a caller's log doesn't
+					# show an opaque "DB open failed" that has to be reverse-engineered.
+					raise sqlite3.OperationalError(
+						f"calibration migration failed adding {table}.{name}: {e}") from e
 	conn.commit()
 
 

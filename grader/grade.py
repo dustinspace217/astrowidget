@@ -42,6 +42,10 @@ SUDDEN_ARTIFACT = "sudden-artifact"
 DAWN = "dawn"
 TOO_FEW = "too-few"
 
+# Re-grade-on-growth (DEF-3b-01) only re-checks sessions graded within this many days —
+# beyond it a folder is certainly done copying. Generous vs the real robocopy lag (hours).
+_GROWTH_CHECK_DAYS = 4
+
 
 def _parse_dateobs(iso: str | None) -> datetime | None:
 	"""Parse a FITS DATE-OBS (UTC, usually no offset) to an aware UTC datetime."""
@@ -105,6 +109,21 @@ def classify_transition(
 	if dawn_utc is not None and onset is not None and onset >= dawn_utc:
 		return {"class": DAWN, "detail": detail}
 	return {"class": GRADUAL_CLOUD, "detail": detail}
+
+
+def _trend(sp: list[float]) -> float:
+	"""Normalized session trend: (median of the last third − median of the first third)
+	/ median of the first third. Median-of-thirds — the SAME robust statistic
+	classify_transition uses — so one noisy first/last sub can't swing it, unlike a raw
+	two-endpoint slope (DEF-AD-01). Negative = the night got worse. 0.0 with < 2 subs or
+	no opening signal."""
+	n = len(sp)
+	if n < 2:
+		return 0.0
+	third = max(1, n // 3)
+	first = float(np.median(sp[:third]))
+	last = float(np.median(sp[-third:]))
+	return (last - first) / first if first else 0.0
 
 
 def _dark_window(start_utc: datetime, lat: float,
@@ -243,6 +262,15 @@ def grade_session(
 	# re-tune rather than silently authoritative.
 	read_note = f"read {len(subs)}/{attempted} subs" if read_failures else None
 
+	# Session-level provenance for the skip pre-filter + the re-grade-on-growth check.
+	# dir_date = the folder's own name (a remote site's folder date differs from the
+	# Pacific-computed night_date — DEF-3b-02). source_file_count = the TOTAL FITS files
+	# globbed (including calib/dups): the sweep re-grades this night if a later sweep sees
+	# MORE files (robocopy finished after a partial grade — DEF-3b-01). Raw glob count is
+	# the right growth signal because it's measured identically on both sides.
+	dir_date = Path(folder).name
+	source_file_count = attempted
+
 	have_coords = lat is not None and lon is not None
 	# The night's astro-dark window — computed ONCE (it depends on site + date, not the
 	# group). Every grade is restricted to this window so twilight/dawn subs (bright-sky
@@ -287,8 +315,7 @@ def grade_session(
 		# already removed, so this only bites on the no-coords path).
 		cls = classify_transition(dark_group, dawn_utc=dark_end)
 		sp = [m.get("star_proxy") or 0 for m in dark_group]
-		# Trend: simple normalized slope (first→last fractional change), negative = worse.
-		trend = ((sp[-1] - sp[0]) / sp[0]) if sp and sp[0] else 0.0
+		trend = _trend(sp)   # median-of-thirds, robust to a single noisy sub (DEF-AD-01)
 		night_date = cl.observing_date(first_obs.astimezone()) if first_obs else ""
 		note_parts = [n for n in (
 			read_note,
@@ -308,6 +335,7 @@ def grade_session(
 				if dark_group else 0.0,
 			"transition": cls["class"], "detail": cls["detail"],
 			"night_date": night_date, "site_id": site_id,
+			"dir_date": dir_date, "source_file_count": source_file_count,
 			"notes": "; ".join(note_parts) or None,
 		})
 	return grades
@@ -394,20 +422,33 @@ def _session_dirs(raws_root: str):
 			yield d, target, rig, d.name
 
 
-def _graded_keys(conn, site_id: str) -> set[tuple[str, str]]:
-	"""Set of (night_date, target) pairs already in fits_grades for this site — the
-	sweep skips these so it doesn't re-read a graded night's FITS over the network.
-	The DB UNIQUE constraint is the backstop if the dir-date pre-filter ever misses."""
-	rows = conn.execute(
-		"SELECT DISTINCT night_date, target FROM fits_grades WHERE site_id = ? COLLATE NOCASE",
-		(site_id,),
-	).fetchall() if site_id is not None else conn.execute(
-		# site_id None = attribution mode: keys across ALL sites. Valid because
-		# target embeds the rig and a rig is physically at one site, so the
-		# (night_date, target) pair is globally unique — and site-agnostic
-		# checking avoids re-reading headers for already-graded sessions.
-		"SELECT DISTINCT night_date, target FROM fits_grades").fetchall()
-	return {(r[0], r[1]) for r in rows}
+def _graded_keys(conn, site_id: str) -> dict[tuple[str, str], int | None]:
+	"""Map (folder-date, target) -> the source_file_count recorded for that session, for
+	every grade already in fits_grades. The sweep skips a (dir_date, target) it finds here
+	UNLESS the folder has since grown past the stored count (re-grade-on-growth, DEF-3b-01).
+
+	The key uses the stored `dir_date` (the session FOLDER's name) and falls back to
+	`night_date` for rows graded before that column existed — because the sweep's pre-filter
+	knows the folder name, and a remote site's folder date differs from the Pacific-computed
+	night_date (DEF-3b-02). When several rows share a key (one per filter), keep the MAX
+	source_file_count so a partial filter can't make the night look smaller than it was.
+
+	site_id None = attribution mode: keys across ALL sites. Valid because target embeds the
+	rig and a rig is physically at one site, so (dir_date, target) is globally unique."""
+	q = ("SELECT COALESCE(dir_date, night_date), target, source_file_count "
+		 "FROM fits_grades")
+	rows = (conn.execute(q + " WHERE site_id = ? COLLATE NOCASE", (site_id,)).fetchall()
+			if site_id is not None else conn.execute(q).fetchall())
+	out: dict[tuple[str, str], int | None] = {}
+	for key, target, count in rows:
+		prev = out.get((key, target), -1)
+		# Keep the largest known count; None (old row) sorts below any real count but
+		# above the -1 sentinel so a key with only NULL counts maps to None.
+		if prev == -1:
+			out[(key, target)] = count
+		elif count is not None and (prev is None or count > prev):
+			out[(key, target)] = count
+	return out
 
 
 def _site_coords(site_id: str, config_path: str | None = None):
@@ -499,6 +540,16 @@ def _attribute_session(session_dir: str | Path,
 	return None
 
 
+def _count_fits(folder: str | Path) -> int:
+	"""Cheap count of FITS files under a session folder — a directory listing only, no
+	headers or pixels read. Compared against the stored source_file_count to detect a
+	folder that GREW since it was graded (robocopy finished after a partial grade —
+	DEF-3b-01). Counts the same set grade_session globs (*.fits + *.fit) so the two sides
+	are measured identically."""
+	root = Path(folder)
+	return sum(1 for _ in root.rglob("*.fits")) + sum(1 for _ in root.rglob("*.fit"))
+
+
 def grade_pending(
 	raws_root: str, site_id: str = "Bainbridge",
 	lat: float | None = None, lon: float | None = None, write: bool = True,
@@ -550,6 +601,12 @@ def grade_pending(
 	today = now_local.date().isoformat()
 	# Lower bound (inclusive). since_days<=0 disables it (full backfill).
 	cutoff = (now_local.date() - timedelta(days=since_days)).isoformat() if since_days > 0 else ""
+	# The re-grade-on-growth check (DEF-3b-01) only matters for a session whose robocopy
+	# might still be flushing — i.e. a recent one. Beyond this many days a graded session is
+	# certainly complete, so we skip the per-session _count_fits (a CIFS dir listing) and let
+	# the done-set short-circuit it. Keeps the daily sweep's skip path a near-pure DB lookup
+	# instead of listing every one of ~300 folders each morning (QA: adversarial cost finding).
+	growth_cutoff = (now_local.date() - timedelta(days=_GROWTH_CHECK_DAYS)).isoformat()
 
 	conn = cl.connect()
 	try:
@@ -563,6 +620,7 @@ def grade_pending(
 	skipped_old = 0
 	skipped_rig = 0
 	skipped_unattributed = 0
+	regraded_grown = 0
 	for session_dir, target, rig, dir_date in _session_dirs(raws_root):
 		seen += 1
 		if rigs is not None and rig not in rigs:
@@ -574,7 +632,21 @@ def grade_pending(
 			skipped_old += 1
 			continue  # older than the lookback window
 		if not force and (dir_date, target) in done:
-			continue  # already graded this night + target (--force re-grades anyway)
+			# Already graded — but re-grade if the folder has GROWN past the file-count
+			# recorded then (a partial grade taken while robocopy was still flushing, now
+			# complete — DEF-3b-01). Only bother for RECENT sessions (older ones are long
+			# complete); a NULL stored count (row graded before the column existed) is
+			# treated as complete: skip. --force bypasses this whole check.
+			if dir_date < growth_cutoff:
+				continue  # too old to still be copying — skip without a CIFS listing
+			stored = done[(dir_date, target)]
+			current = _count_fits(session_dir)
+			if stored is None or current <= stored:
+				continue  # already graded this night + target, not grown
+			regraded_grown += 1
+			sys.stderr.write(
+				f"grader: re-grading {target} {dir_date} — folder grew to {current} files "
+				f"(was {stored}); healing a partial grade\n")
 		# Which site is this session's data FROM? In attribution mode the session's
 		# own header coordinates decide; in fixed mode the caller's site_id does.
 		g_site, g_lat, g_lon = site_id, lat, lon
@@ -604,6 +676,10 @@ def grade_pending(
 	# exits non-zero up front when the root isn't a readable directory at all).
 	sys.stderr.write(
 		f"grader: swept {seen} session dir(s) under {raws_root}; graded {len(written)}\n")
+	if regraded_grown:
+		sys.stderr.write(
+			f"grader: re-graded {regraded_grown} session(s) whose folder grew since the "
+			f"last grade (partial-grade heal)\n")
 	if skipped_rig:
 		sys.stderr.write(
 			f"grader: skipped {skipped_rig} session(s) from rigs not in {sorted(rigs)} "
@@ -647,9 +723,10 @@ def main() -> int:
 						 "(repeatable). Raws/ mixes home + remote scopes, so pass your "
 						 "home rig(s) (e.g. --rig 'Eon 70') to keep rentals out of this site.")
 	ap.add_argument("--force", action="store_true",
-					help="--scan only: re-grade nights even if already graded. Use after a "
-						 "metric change (e.g. the astro-dark restriction) to recompute "
-						 "existing rows — the write REPLACEs on the UNIQUE key.")
+					help="--scan only: re-grade nights even if already graded (and bypass the "
+						 "re-grade-on-growth check). Use after a metric change (e.g. the "
+						 "astro-dark restriction) to recompute existing rows — the write "
+						 "replaces the night's rows for each target.")
 	args = ap.parse_args()
 
 	# --scan: the daily sweep.
@@ -738,19 +815,32 @@ def _write_grades(grades: list[dict[str, Any]], site_id: str) -> None:
 	import calibration_log as cl
 	conn = cl.connect()
 	try:
-		for g in grades:
-			# INSERT OR REPLACE keys on the UNIQUE(night_date, site_id, target, filter)
-			# constraint: re-grading a night (the daily sweep re-runs, or a manual
-			# re-grade after more subs land) overwrites that night's row instead of
-			# accumulating duplicates. Idempotent by construction.
+		# Delete-then-insert per session: a re-grade replaces the night's rows AND removes
+		# any (target,filter) group that VANISHED since the last grade (a filter header
+		# corrected, files moved). Plain INSERT OR REPLACE keys on the full UNIQUE tuple, so
+		# it would overwrite present filters but LEAVE a stale row for a filter no longer
+		# produced (DEF-AD-02). The DELETE matches the old rows by EITHER the folder identity
+		# (dir_date) OR the night_date: the skip/growth check keys on dir_date, but the row's
+		# night_date is what the UNIQUE/join use — keying the DELETE on only one of them would
+		# orphan a row if the recomputed night_date ever shifted from the stored one (QA: a
+		# 3-agent-convergent finding). COLLATE NOCASE on site_id matches every read path, so a
+		# site-id casing drift can't dodge the DELETE and silently duplicate.
+		for dir_d, night_d, target in {
+				(g.get("dir_date"), g["night_date"], g["target"]) for g in grades}:
 			conn.execute(
-				"""INSERT OR REPLACE INTO fits_grades (graded_at, night_date, site_id,
-					target, filter, n_subs, star_count_median, star_count_trend,
-					bg_median, transition_class, notes)
-				   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+				"DELETE FROM fits_grades WHERE site_id = ? COLLATE NOCASE AND target = ? "
+				"AND (dir_date = ? OR night_date = ?)",
+				(site_id, target, dir_d, night_d))
+		for g in grades:
+			conn.execute(
+				"""INSERT INTO fits_grades (graded_at, night_date, site_id, target, filter,
+					n_subs, star_count_median, star_count_trend, bg_median, transition_class,
+					dir_date, source_file_count, notes)
+				   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
 				(datetime.now(timezone.utc).isoformat(), g["night_date"], site_id,
 				 g["target"], g["filter"], g["n_subs"], g["star_count_median"],
-				 g["star_count_trend"], g["bg_median"], g["transition"], g.get("notes")),
+				 g["star_count_trend"], g["bg_median"], g["transition"],
+				 g.get("dir_date"), g.get("source_file_count"), g.get("notes")),
 			)
 		conn.commit()
 	finally:

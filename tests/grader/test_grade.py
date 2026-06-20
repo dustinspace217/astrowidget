@@ -100,6 +100,23 @@ def test_dark_window_bainbridge_near_solstice():
 	assert 1.0 < dur_h < 2.5
 
 
+def test_trend_median_of_thirds_resists_endpoint_noise():
+	"""star_count_trend uses median-of-thirds (DEF-AD-01), so one spurious endpoint sub
+	can't swing it the way a raw first/last slope would, while a real decline still reads
+	clearly negative."""
+	# 9 stable ~1000 subs with one spurious huge FIRST sub. The first-third MEDIAN
+	# (median of [5000,1000,1000] = 1000) rejects the lone outlier → ≈ flat, whereas the
+	# raw two-endpoint slope is dominated by it.
+	noisy = [5000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000]
+	raw_slope = (noisy[-1] - noisy[0]) / noisy[0]            # -0.8, swung by the outlier
+	assert abs(grade._trend(noisy)) < abs(raw_slope)        # median-of-thirds is more robust
+	assert abs(grade._trend(noisy)) < 0.1                   # ...and stays ≈ flat
+	# A genuine sustained decline still reads strongly negative.
+	assert grade._trend([1000, 950, 900, 600, 500, 400, 300, 250, 200]) < -0.3
+	# Too few subs → 0.0 (no trend).
+	assert grade._trend([1000]) == 0.0
+
+
 def test_dark_window_none_when_no_astro_dark():
 	"""High latitude near solstice: the Sun never reaches −18°, so there is no astro-dark
 	window → (None, None). grade_session falls back to unfiltered-and-flagged for these."""

@@ -223,6 +223,45 @@ def test_migrate_adds_raw_columns_to_old_db(tmp_path, monkeypatch):
 	assert got == (3.0, 40, "7timer")
 
 
+def test_migrate_adds_grade_columns_to_old_db(tmp_path, monkeypatch):
+	# Same migration path for fits_grades: an OLD grades table (no dir_date /
+	# source_file_count) must gain both columns on connect(), and they must be writable.
+	# Both tables must exist (_migrate PRAGMAs each); build their explicit PRE-DEF-3b shapes.
+	import sqlite3
+	monkeypatch.setattr(cl, "DB_PATH", tmp_path / "old_grades.db")
+	old = sqlite3.connect(str(cl.DB_PATH))
+	old.execute("""CREATE TABLE forecasts (
+		id INTEGER PRIMARY KEY, fetched_at TEXT, night_date TEXT, night_label TEXT,
+		site_id TEXT, recommendation TEXT, bb_score INTEGER, bb_verdict TEXT,
+		nb_score INTEGER, nb_verdict TEXT, cloud INTEGER, stability INTEGER,
+		sky_brightness INTEGER, transparency INTEGER, moon_illum REAL, moon_alt REAL,
+		precip_peak_pct INTEGER, best_window_start TEXT, best_window_end TEXT,
+		managed INTEGER, dark_start TEXT, dark_end TEXT)""")
+	# Pre-DEF-3b fits_grades: original columns, NO dir_date / source_file_count.
+	old.execute("""CREATE TABLE fits_grades (
+		id INTEGER PRIMARY KEY, graded_at TEXT NOT NULL, night_date TEXT NOT NULL,
+		site_id TEXT NOT NULL, target TEXT, filter TEXT, n_subs INTEGER,
+		star_count_median REAL, star_count_trend REAL, bg_median REAL,
+		transition_class TEXT, notes TEXT,
+		UNIQUE(night_date, site_id, target, filter))""")
+	old.commit()
+	old.close()
+
+	conn = cl.connect()  # runs _migrate → ALTERs the two grade columns in
+	cols = {r[1] for r in conn.execute("PRAGMA table_info(fits_grades)")}
+	assert {"dir_date", "source_file_count"} <= cols
+	# Writable, not just named: a grade round-trips through the new columns.
+	conn.execute(
+		"""INSERT INTO fits_grades (graded_at, night_date, site_id, target, filter,
+			n_subs, dir_date, source_file_count)
+		   VALUES ('2026-06-20T00:00:00Z','2026-06-15','B','T','L',6,'2026-06-15',9)""")
+	conn.commit()
+	got = conn.execute(
+		"SELECT dir_date, source_file_count FROM fits_grades").fetchone()
+	conn.close()
+	assert got == ("2026-06-15", 9)
+
+
 def test_log_run_handles_null_cloud_convergence(tmp_path, monkeypatch):
 	# Common production state (international sites / skipped convergence fetch):
 	# displayFactors present, cloudConvergence None → cloud_spread NULL, no crash on

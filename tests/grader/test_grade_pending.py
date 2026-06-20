@@ -185,7 +185,125 @@ def test_graded_keys_returns_night_target_pairs(tmp_path):
 		keys = grade._graded_keys(conn, "Bainbridge")
 	finally:
 		conn.close()
-	assert keys == {("2026-05-30", "A"), ("2026-05-31", "B")}
+	# Now a dict {(dir_date-or-night, target): source_file_count}; canned grades carry no
+	# count so the values are None. The KEYS are what the skip pre-filter checks.
+	assert set(keys) == {("2026-05-30", "A"), ("2026-05-31", "B")}
+	assert all(v is None for v in keys.values())
+
+
+def test_graded_keys_prefers_dir_date_and_keeps_count(tmp_path):
+	"""When a row has a stored dir_date (a remote folder whose date differs from the
+	Pacific-computed night_date), _graded_keys keys on the FOLDER date so the sweep's
+	pre-filter matches it and doesn't re-read every time (DEF-3b-02) — and it carries the
+	source_file_count for the growth check (DEF-3b-01)."""
+	grade._write_grades([{
+		"target": "T / r", "filter": "L", "n_subs": 5, "star_count_median": 1.0,
+		"star_count_trend": 0.0, "bg_median": 1.0, "transition": grade.STABLE,
+		"night_date": "2026-05-31", "site_id": "UDRO",
+		"dir_date": "2026-06-01", "source_file_count": 9}], "UDRO")
+	conn = cl.connect()
+	try:
+		keys = grade._graded_keys(conn, "UDRO")
+	finally:
+		conn.close()
+	assert keys == {("2026-06-01", "T / r"): 9}      # keyed on dir_date, carries the count
+
+
+def test_regrade_on_growth_heals_partial_grade(tmp_path, monkeypatch):
+	"""A session graded while robocopy was still flushing (partial) is RE-graded once its
+	folder grows past the recorded file-count, instead of being skipped forever — DEF-3b-01.
+	An unchanged folder is still skipped."""
+	d = _make_session(tmp_path, "M81", _offset(2), n_files=3)   # partial: 3 files
+	_stub_read_sub(monkeypatch, lambda i, p: _sub(f"2026-05-29T08:{i:02d}:00", 1000, path=p))
+	w1 = grade.grade_pending(str(tmp_path), "Bainbridge", write=True, since_days=0)
+	assert len(w1) == 1 and w1[0]["source_file_count"] == 3
+	# Unchanged folder → skipped (not grown).
+	assert grade.grade_pending(str(tmp_path), "Bainbridge", write=True, since_days=0) == []
+	# Robocopy finishes: 3 more subs land.
+	night = _offset(2)
+	for i in range(3, 6):
+		(d / f"Eon70_M81_{night}_L_{i:04d}.fits").write_bytes(b"")
+	# Folder grew (6 > 3) → re-grades, and the stored count updates to 6.
+	w3 = grade.grade_pending(str(tmp_path), "Bainbridge", write=True, since_days=0)
+	assert len(w3) == 1 and w3[0]["source_file_count"] == 6
+
+
+def test_regrade_removes_vanished_filter_row(tmp_path, monkeypatch):
+	"""A re-grade that no longer produces a (target,filter) group DELETES the stale row
+	rather than leaving it (DEF-AD-02). Here the H filter disappears on the second grade."""
+	_make_session(tmp_path, "M81", _offset(2), n_files=2)
+	_stub_read_sub(monkeypatch, lambda i, p: _sub(
+		f"2026-05-29T08:{i:02d}:00", 1000, filt=("H", "L")[i], path=p))
+	grade.grade_pending(str(tmp_path), "Bainbridge", write=True, since_days=0)
+	# Force re-grade, but now BOTH subs read as L — the H group has vanished.
+	_stub_read_sub(monkeypatch,
+				   lambda i, p: _sub(f"2026-05-29T09:{i:02d}:00", 1000, filt="L", path=p))
+	grade.grade_pending(str(tmp_path), "Bainbridge", write=True, since_days=0, force=True)
+	conn = cl.connect()
+	try:
+		filters = {r[0] for r in conn.execute(
+			"SELECT filter FROM fits_grades WHERE target = 'M81 / Eon70'")}
+	finally:
+		conn.close()
+	assert filters == {"L"}                          # the stale H row was deleted
+
+
+def test_regrade_with_shifted_night_date_leaves_no_orphan(tmp_path):
+	"""If a re-grade computes a DIFFERENT night_date than the original (a TZ / dark-window
+	edge), delete-then-insert still removes the old row by FOLDER identity (dir_date), so
+	no orphaned duplicate row survives (QA: the 3-agent-convergent finding)."""
+	base = {"target": "T / r", "site_id": "Bainbridge", "filter": "L", "bg_median": 1.0,
+			"star_count_median": 1.0, "star_count_trend": 0.0, "transition": grade.STABLE}
+	# Original: folder 2026-06-15, but night_date resolved to 2026-06-14.
+	grade._write_grades([{**base, "night_date": "2026-06-14", "dir_date": "2026-06-15",
+						   "n_subs": 5, "source_file_count": 5}], "Bainbridge")
+	# Re-grade of the SAME folder; night_date now resolves to 2026-06-15.
+	grade._write_grades([{**base, "night_date": "2026-06-15", "dir_date": "2026-06-15",
+						   "n_subs": 8, "source_file_count": 8}], "Bainbridge")
+	conn = cl.connect()
+	try:
+		rows = conn.execute(
+			"SELECT night_date, n_subs FROM fits_grades WHERE target = 'T / r'").fetchall()
+	finally:
+		conn.close()
+	assert rows == [("2026-06-15", 8)]               # one row; the 06-14 row wasn't orphaned
+
+
+def test_graded_keys_max_count_across_mixed_null_and_real(tmp_path):
+	"""For one (dir_date,target) with two filter rows — one carrying a source_file_count,
+	one NULL — _graded_keys keeps the real MAX (a partial filter can't shrink the known
+	file-count of the night)."""
+	base = {"target": "T / r", "site_id": "B", "night_date": "2026-06-10",
+			"dir_date": "2026-06-10", "n_subs": 3, "star_count_median": 1.0,
+			"star_count_trend": 0.0, "bg_median": 1.0, "transition": grade.STABLE}
+	grade._write_grades([{**base, "filter": "L", "source_file_count": 12},
+						  {**base, "filter": "H", "source_file_count": None}], "B")
+	conn = cl.connect()
+	try:
+		keys = grade._graded_keys(conn, "B")
+	finally:
+		conn.close()
+	assert keys == {("2026-06-10", "T / r"): 12}
+
+
+def test_force_regrades_unchanged_folder(tmp_path, monkeypatch):
+	"""--force re-grades even a folder that has NOT grown (bypasses the growth check)."""
+	_make_session(tmp_path, "M81", _offset(2), n_files=3)
+	_stub_read_sub(monkeypatch, lambda i, p: _sub(f"2026-05-29T08:{i:02d}:00", 1000, path=p))
+	grade.grade_pending(str(tmp_path), "Bainbridge", write=True, since_days=0)
+	w = grade.grade_pending(str(tmp_path), "Bainbridge", write=True, since_days=0, force=True)
+	assert len(w) == 1                               # re-graded despite no growth
+
+
+def test_regrade_skips_when_folder_shrinks(tmp_path, monkeypatch):
+	"""A folder with FEWER files than recorded (a sub deleted/moved) is NOT re-graded —
+	current <= stored skips, no spurious re-read."""
+	d = _make_session(tmp_path, "M81", _offset(2), n_files=4)
+	_stub_read_sub(monkeypatch, lambda i, p: _sub(f"2026-05-29T08:{i:02d}:00", 1000, path=p))
+	grade.grade_pending(str(tmp_path), "Bainbridge", write=True, since_days=0)
+	night = _offset(2)
+	(d / f"Eon70_M81_{night}_L_0003.fits").unlink()  # folder shrank 4 → 3
+	assert grade.grade_pending(str(tmp_path), "Bainbridge", write=True, since_days=0) == []
 
 
 # ---- _site_coords ----------------------------------------------------------

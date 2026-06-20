@@ -446,6 +446,124 @@ def test_grade_session_stamps_partial_read_in_notes(tmp_path, monkeypatch):
 	assert grades[0]["notes"] and "read 3/5 subs" in grades[0]["notes"]
 
 
+# ---- astro-dark restriction in grade_session (2026-06-20) -------------------
+
+def test_grade_session_excludes_pre_dark_subs(tmp_path, monkeypatch):
+	"""WITH site coords, grade_session restricts the metric to true astro-dark: subs
+	taken before dark_start (twilight) are dropped, so n_subs and the median reflect
+	only the dark core. Bainbridge near solstice — dark_start ≈07:16Z on 2026-06-16."""
+	d = _populate(tmp_path, 8)
+	# i 0..2 twilight (pre-dark, star count ramping up); i 3..7 dark (stable ~1000).
+	times = ["06:30", "06:45", "07:00", "07:30", "07:45", "08:00", "08:15", "08:30"]
+	procs = [100, 200, 300, 1000, 1010, 1005, 1015, 1008]
+	_stub_read_sub(monkeypatch,
+				   lambda i, p: _sub(f"2026-06-16T{times[i]}:00", procs[i], filt="H", path=p))
+	grades = grade.grade_session(str(d), "Bainbridge",
+								 lat=47.62, lon=-122.5, target="Iris / Eon 70")
+	assert len(grades) == 1
+	g = grades[0]
+	assert g["n_subs"] == 5                      # 3 twilight subs excluded
+	assert g["star_count_median"] > 900          # median = dark core, not dragged down
+	assert "outside astro-dark excluded" in (g["notes"] or "")
+
+
+def test_grade_session_all_twilight_group_emits_zero_row(tmp_path, monkeypatch):
+	"""A group shot ENTIRELY before dark (Ha front-loaded in twilight) yields a row with
+	n_subs=0 — so re-grading REPLACEs a stale contaminated grade instead of leaving it.
+	The row is emitted (not silently skipped)."""
+	d = _populate(tmp_path, 4)
+	twi = ["06:00", "06:15", "06:30", "06:45"]   # all before ~07:16Z dark_start
+	_stub_read_sub(monkeypatch,
+				   lambda i, p: _sub(f"2026-06-16T{twi[i]}:00", 100 + i, filt="H", path=p))
+	grades = grade.grade_session(str(d), "Bainbridge",
+								 lat=47.62, lon=-122.5, target="Iris / Eon 70")
+	assert len(grades) == 1
+	assert grades[0]["n_subs"] == 0
+	assert grades[0]["transition"] == grade.TOO_FEW
+
+
+def test_grade_session_no_coords_grades_whole_group(tmp_path, monkeypatch):
+	"""WITHOUT coords there's no dark window, so grade_session grades the whole group
+	unrestricted (existing behavior preserved) — nothing dropped, no astro-dark note."""
+	d = _populate(tmp_path, 6)
+	# Times that WOULD straddle a dark boundary if coords were supplied.
+	times = ["06:30", "06:45", "07:30", "08:00", "08:30", "09:30"]
+	_stub_read_sub(monkeypatch,
+				   lambda i, p: _sub(f"2026-06-16T{times[i]}:00", 1000, filt="H", path=p))
+	grades = grade.grade_session(str(d), "Bainbridge", target="Iris / Eon 70")  # no lat/lon
+	assert len(grades) == 1
+	assert grades[0]["n_subs"] == 6                       # nothing excluded without coords
+	assert "astro-dark" not in (grades[0]["notes"] or "")
+
+
+def test_grade_session_already_dark_no_dusk_exclusion(tmp_path, monkeypatch):
+	"""Imaging STARTS after astro-dark began (earliest sub already past −18°) → there are
+	no twilight subs, so nothing is excluded on the dusk side. Documents that the dusk
+	no-op is CORRECT here (no twilight exists), not the bug a reviewer suspected."""
+	d = _populate(tmp_path, 5)
+	# All subs 08:00–08:40Z = 01:00–01:40 PDT, inside the 06-15 dark window [~07:16,~09:04]Z.
+	times = ["08:00", "08:10", "08:20", "08:30", "08:40"]
+	_stub_read_sub(monkeypatch,
+				   lambda i, p: _sub(f"2026-06-16T{times[i]}:00", 1000, filt="L", path=p))
+	grades = grade.grade_session(str(d), "Bainbridge",
+								 lat=47.62, lon=-122.5, target="Iris / Eon 70")
+	assert len(grades) == 1
+	assert grades[0]["n_subs"] == 5                       # all kept — none were twilight
+	assert "outside astro-dark" not in (grades[0]["notes"] or "")
+
+
+def test_grade_session_two_filters_one_twilight_one_dark(tmp_path, monkeypatch):
+	"""One dark window, applied PER group: an all-twilight filter → n_subs=0 row, an
+	all-dark filter → full row, from the same session. The all-twilight row must still
+	carry the night_date (else it silently breaks the calibration join)."""
+	d = _populate(tmp_path, 8)
+	# 0..3 Ha all twilight (pre-dark); 4..7 L all dark.
+	specs = [("H", "06:00"), ("H", "06:15"), ("H", "06:30"), ("H", "06:45"),
+			 ("L", "07:30"), ("L", "07:45"), ("L", "08:00"), ("L", "08:15")]
+	_stub_read_sub(monkeypatch, lambda i, p: _sub(
+		f"2026-06-16T{specs[i][1]}:00", 1000, filt=specs[i][0], path=p))
+	grades = grade.grade_session(str(d), "Bainbridge",
+								 lat=47.62, lon=-122.5, target="Iris / Eon 70")
+	by_filter = {g["filter"]: g for g in grades}
+	assert by_filter["H"]["n_subs"] == 0                 # all twilight → excluded
+	assert by_filter["L"]["n_subs"] == 4                 # all dark → kept
+	assert by_filter["H"]["night_date"] and \
+		by_filter["H"]["night_date"] == by_filter["L"]["night_date"]
+
+
+def test_force_regrade_overwrites_existing_row(tmp_path, monkeypatch):
+	"""--force re-grades an already-graded night and the write REPLACEs the prior row
+	(INSERT OR REPLACE on the UNIQUE key) instead of skipping it. Without --force the
+	night is skipped."""
+	_make_session(tmp_path, "M81", _offset(2))
+	night = _offset(2)
+	state = {"n": 5}
+
+	def _fake_session(folder, site_id="Bainbridge", lat=None, lon=None, target=None):
+		return [{"target": target or "M81 / Eon70", "filter": "L", "n_subs": state["n"],
+				 "star_count_median": 1000.0, "star_count_trend": 0.0, "bg_median": 100.0,
+				 "transition": grade.STABLE, "detail": {}, "night_date": night,
+				 "site_id": site_id}]
+
+	monkeypatch.setattr(grade, "grade_session", _fake_session)
+	# First grade writes n_subs=5.
+	grade.grade_pending(str(tmp_path), "Bainbridge", write=True, since_days=0)
+	# Without --force: already graded → skipped, even though grade_session would now say 9.
+	state["n"] = 9
+	assert grade.grade_pending(str(tmp_path), "Bainbridge", write=True, since_days=0) == []
+	# With --force: re-grades and REPLACEs the row.
+	w3 = grade.grade_pending(str(tmp_path), "Bainbridge", write=True, since_days=0, force=True)
+	assert len(w3) == 1
+	conn = cl.connect()
+	try:
+		rows = conn.execute(
+			"SELECT n_subs FROM fits_grades WHERE night_date=? AND target=?",
+			(night, "M81 / Eon70")).fetchall()
+	finally:
+		conn.close()
+	assert len(rows) == 1 and rows[0][0] == 9            # one row, REPLACEd to 9
+
+
 def test_grade_session_flags_dawn_off_on_gradual_cloud(tmp_path, monkeypatch):
 	d = _populate(tmp_path, 6)
 	vals = [10000, 9000, 8000, 7000, 6000, 5000]  # sustained gradual decline → cloud

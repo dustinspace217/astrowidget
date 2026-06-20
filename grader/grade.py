@@ -107,27 +107,75 @@ def classify_transition(
 	return {"class": GRADUAL_CLOUD, "detail": detail}
 
 
-def _astronomical_dawn(date_utc: datetime, lat: float, lon: float) -> datetime | None:
-	"""The night's astronomical dawn (Sun rising through −18°) in UTC, via astropy.
-	Used for dawn-exclusion. None if it can't be computed (e.g. polar) or astropy is
-	unavailable. Searches the morning hours after the given instant."""
-	try:
-		from astropy.coordinates import AltAz, EarthLocation, get_sun
-		from astropy.time import Time
-		import astropy.units as u
-	except ImportError:
-		return None
+def _dark_window(start_utc: datetime, lat: float,
+				 lon: float) -> tuple[datetime | None, datetime | None]:
+	"""The night's astronomical-dark window [dark_start, dark_end] (UTC), via astropy:
+	dark_start = the Sun descending through −18°, dark_end = the next ascending crossing.
+
+	Returns (None, None) when there is no usable window: the Sun never reaches −18° (polar
+	summer / no astro-dark), OR no dark_end is found within the 16 h search (a near-solstice
+	graze — treating it as open-ended would wrongly admit every post-midnight sub), OR the
+	window is shorter than 20 min (a graze with no calibration-useful dark). Callers grade
+	those nights UNFILTERED-and-flagged rather than restrict to a degenerate window. astropy
+	is a hard dependency (read_sub already used it to read every sub), so it is imported
+	directly — were it somehow absent, the read would have failed long before here.
+
+	WHY both ends (this generalises the old dawn-only exclusion): the star-proxy counts
+	pixels above a sky-relative threshold, so in twilight (before dark_start) and at dawn
+	(after dark_end) the bright sky suppresses the count — it ramps UP through dusk and
+	fades DOWN at dawn purely from sky brightness, indistinguishable from a real
+	transparency change. Grades must be computed over true-dark subs only. The dusk end
+	matters because Dustin starts imaging before astro-dark (narrowband-in-twilight is
+	correct practice), so near-solstice sessions are twilight-heavy."""
+	from astropy.coordinates import AltAz, EarthLocation, get_sun
+	from astropy.time import Time
+	import astropy.units as u
 	loc = EarthLocation(lat=lat * u.deg, lon=lon * u.deg)
-	# Sample sun altitude every 10 min over the 12 h after `date_utc`; dawn = the
-	# first time it crosses up through −18°.
-	base = Time(date_utc)
-	dt = np.arange(0, 12 * 60, 10) * u.min
+	base = Time(start_utc)
+	# 5-min sampling over 16 h: long enough to span an early-evening start through next
+	# morning's dawn; fine enough that the crossing is located to ±5 min (well inside the
+	# margin between a session's twilight subs and its first true-dark sub).
+	dt = np.arange(0, 16 * 60, 5) * u.min
 	times = base + dt
 	alt = get_sun(times).transform_to(AltAz(obstime=times, location=loc)).alt.deg
-	for j in range(1, len(alt)):
+	# dark_start: already below −18° at the start (imaging began after dark), else the
+	# first descending crossing.
+	if alt[0] <= -18:
+		dark_start, start_idx = times[0].to_datetime(timezone.utc), 0
+	else:
+		dark_start, start_idx = None, None
+		for j in range(1, len(alt)):
+			if alt[j - 1] > -18 >= alt[j]:
+				dark_start, start_idx = times[j].to_datetime(timezone.utc), j
+				break
+	if dark_start is None:
+		return None, None   # Sun never dips to −18° → no astronomical dark this night
+	# dark_end: the first ascending crossing after dark_start. If none is found in range,
+	# the window is a graze (or the search is too short for this latitude) — return NO
+	# window rather than an open-ended one that would admit every post-midnight sub.
+	for j in range(start_idx + 1, len(alt)):
 		if alt[j - 1] < -18 <= alt[j]:
-			return times[j].to_datetime(timezone.utc)
-	return None
+			dark_end = times[j].to_datetime(timezone.utc)
+			if (dark_end - dark_start) < timedelta(minutes=20):
+				return None, None   # degenerate graze → no calibration-useful dark
+			return dark_start, dark_end
+	return None, None   # no dark_end within the search → unusable (see docstring)
+
+
+def _restrict_to_dark(group: list[dict[str, Any]], dark_start: datetime,
+					  dark_end: datetime | None) -> list[dict[str, Any]]:
+	"""Keep only the subs whose DATE-OBS falls inside [dark_start, dark_end] (true
+	astronomical dark). dark_end=None means dark runs past the search window, so there
+	is no upper bound. Pure + time-only, so it unit-tests without astropy or the NAS."""
+	out: list[dict[str, Any]] = []
+	for m in group:
+		t = _parse_dateobs(m.get("date_obs"))
+		if t is None or t < dark_start:
+			continue
+		if dark_end is not None and t > dark_end:
+			continue
+		out.append(m)
+	return out
 
 
 def grade_session(
@@ -195,30 +243,69 @@ def grade_session(
 	# re-tune rather than silently authoritative.
 	read_note = f"read {len(subs)}/{attempted} subs" if read_failures else None
 
+	have_coords = lat is not None and lon is not None
+	# The night's astro-dark window — computed ONCE (it depends on site + date, not the
+	# group). Every grade is restricted to this window so twilight/dawn subs (bright-sky
+	# subs whose star count tracks sky brightness, not transparency) don't pollute the
+	# median/trend. See _dark_window for the physics. We anchor the window on the
+	# session's EARLIEST sub (the evening start) so the dusk crossing is in range.
+	all_obs = sorted(t for t in (_parse_dateobs(s.get("date_obs")) for s in subs) if t)
+	session_start = None
+	if all_obs:
+		# Anchor on the earliest sub — but first drop any sub more than 18 h before the
+		# MEDIAN sub time. A single stray from another night co-located in the folder would
+		# otherwise anchor the dark-window search on the wrong night and exclude every real
+		# sub; a real session spans < 16 h, so > 18 h from the median is a different night.
+		median_t = all_obs[len(all_obs) // 2]
+		in_night = [t for t in all_obs if (median_t - t) <= timedelta(hours=18)]
+		session_start = in_night[0] if in_night else all_obs[0]
+	dark_start = dark_end = None
+	dark_unavailable = False
+	if have_coords and session_start is not None:
+		dark_start, dark_end = _dark_window(session_start, lat, lon)
+		# No usable window DESPITE coords (no astro-dark, or a graze). Don't silently zero
+		# the night's data — grade the whole group UNFILTERED and flag it. For the
+		# configured mid-latitude sites this never fires.
+		dark_unavailable = dark_start is None
+
 	grades: list[dict[str, Any]] = []
 	for (tgt, filt), group in groups.items():
 		group.sort(key=lambda m: m.get("date_obs") or "")
-		first_obs = _parse_dateobs(group[0].get("date_obs"))
-		have_coords = lat is not None and lon is not None
-		dawn = (_astronomical_dawn(first_obs, lat, lon)
-				if (first_obs and have_coords) else None)
-		cls = classify_transition(group, dawn_utc=dawn)
-		sp = [m.get("star_proxy") or 0 for m in group]
+		if dark_start is not None:
+			# Separate subs with an UNPARSEABLE DATE-OBS from genuine out-of-dark
+			# exclusions, so a corrupt timestamp isn't silently miscounted as "twilight".
+			parseable = [m for m in group if _parse_dateobs(m.get("date_obs")) is not None]
+			unparseable = len(group) - len(parseable)
+			dark_group = _restrict_to_dark(parseable, dark_start, dark_end)
+			excluded = len(parseable) - len(dark_group)
+		else:
+			dark_group, unparseable, excluded = group, 0, 0
+		# night_date from a dark sub if any, else fall back to the group's first sub so a
+		# fully-excluded (all-twilight) group still records the night it belongs to.
+		first_obs = _parse_dateobs((dark_group or group)[0].get("date_obs"))
+		# classify only the dark subs; dark_end as the dawn backstop (post-dark subs are
+		# already removed, so this only bites on the no-coords path).
+		cls = classify_transition(dark_group, dawn_utc=dark_end)
+		sp = [m.get("star_proxy") or 0 for m in dark_group]
 		# Trend: simple normalized slope (first→last fractional change), negative = worse.
 		trend = ((sp[-1] - sp[0]) / sp[0]) if sp and sp[0] else 0.0
 		night_date = cl.observing_date(first_obs.astimezone()) if first_obs else ""
-		# A gradual-cloud verdict reached WITHOUT coords couldn't rule out dawn — flag
-		# it so the re-tune can treat that particular cloud label as unverified.
 		note_parts = [n for n in (
 			read_note,
+			f"{excluded} sub(s) outside astro-dark excluded" if excluded else None,
+			f"{unparseable} sub(s) with unparseable DATE-OBS dropped" if unparseable else None,
+			"dark-window unavailable — unfiltered" if dark_unavailable else None,
+			# A gradual-cloud verdict reached WITHOUT coords couldn't rule out dawn — flag
+			# it so the re-tune can treat that particular cloud label as unverified.
 			"dawn-exclusion off (no coords)"
 				if (cls["class"] == GRADUAL_CLOUD and not have_coords) else None,
 		) if n]
 		grades.append({
-			"target": tgt, "filter": filt, "n_subs": len(group),
+			"target": tgt, "filter": filt, "n_subs": len(dark_group),
 			"star_count_median": float(np.median(sp)) if sp else 0.0,
 			"star_count_trend": round(trend, 4),
-			"bg_median": float(np.median([m.get("median_bg") or 0.0 for m in group])),
+			"bg_median": float(np.median([m.get("median_bg") or 0.0 for m in dark_group]))
+				if dark_group else 0.0,
 			"transition": cls["class"], "detail": cls["detail"],
 			"night_date": night_date, "site_id": site_id,
 			"notes": "; ".join(note_parts) or None,
@@ -416,7 +503,7 @@ def grade_pending(
 	raws_root: str, site_id: str = "Bainbridge",
 	lat: float | None = None, lon: float | None = None, write: bool = True,
 	since_days: int = 30, rigs: set[str] | None = None,
-	sites: list[dict[str, Any]] | None = None,
+	sites: list[dict[str, Any]] | None = None, force: bool = False,
 ) -> list[dict[str, Any]]:
 	"""Scan raws_root and grade every COMPLETE, not-yet-graded session folder.
 
@@ -486,8 +573,8 @@ def grade_pending(
 		if cutoff and dir_date < cutoff:
 			skipped_old += 1
 			continue  # older than the lookback window
-		if (dir_date, target) in done:
-			continue  # already graded this night + target
+		if not force and (dir_date, target) in done:
+			continue  # already graded this night + target (--force re-grades anyway)
 		# Which site is this session's data FROM? In attribution mode the session's
 		# own header coordinates decide; in fixed mode the caller's site_id does.
 		g_site, g_lat, g_lon = site_id, lat, lon
@@ -559,6 +646,10 @@ def main() -> int:
 					help="--scan only: grade only sessions from this rig folder "
 						 "(repeatable). Raws/ mixes home + remote scopes, so pass your "
 						 "home rig(s) (e.g. --rig 'Eon 70') to keep rentals out of this site.")
+	ap.add_argument("--force", action="store_true",
+					help="--scan only: re-grade nights even if already graded. Use after a "
+						 "metric change (e.g. the astro-dark restriction) to recompute "
+						 "existing rows — the write REPLACEs on the UNIQUE key.")
 	args = ap.parse_args()
 
 	# --scan: the daily sweep.
@@ -589,7 +680,7 @@ def main() -> int:
 			written = grade_pending(args.scan,
 									write=args.write, since_days=args.since_days,
 									rigs=set(args.rig) if args.rig else None,
-									sites=cfg_sites)
+									sites=cfg_sites, force=args.force)
 		else:
 			# Fixed-site mode (explicit --site): every grade stamped with that id.
 			# Resolve dawn-exclusion coords from the gitignored config (so the
@@ -606,7 +697,8 @@ def main() -> int:
 					f"DISABLED; dawn-fade nights may misclassify as gradual-cloud.\n")
 			written = grade_pending(args.scan, args.site, lat, lon,
 									write=args.write, since_days=args.since_days,
-									rigs=set(args.rig) if args.rig else None)
+									rigs=set(args.rig) if args.rig else None,
+									force=args.force)
 		if not written:
 			print("Auto-grader: no new complete nights to grade.")
 			return 0

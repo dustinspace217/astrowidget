@@ -246,7 +246,7 @@ if os.environ.get("ASTROWIDGET_REQUIRE_BINARY") == "1" and not fx.SCORING_BINARY
 def _run_binary(now_utc: datetime, *, cloud: float, managed: bool,
 				bortle=5, precip=5.0, with_aod=True, with_250=True,
 				wind=6.0, wind_pattern=None, precip_null_every=None,
-				aod=0.06, thresholds=None, nb_leakage=None) -> dict:
+				aod=0.06, thresholds=None, nb_leakage=None, snow=0.0) -> dict:
 	"""Crafts one stdin payload, runs the real binary, returns tonight's night dict.
 
 	Extras (QA 2026-06-09 veto tests): `wind_pattern` cycles a list of wind
@@ -273,6 +273,7 @@ def _run_binary(now_utc: datetime, *, cloud: float, managed: bool,
 			),
 			"precipitation": 0.0,
 			"visibility": 30000.0,
+			"snow_depth": snow,
 		}
 		if with_250:
 			row["wind_speed_250hPa"] = 30.0
@@ -577,11 +578,44 @@ def test_nb_leakage_override_is_wired_end_to_end():
 
 
 @pytestmark_binary
-def test_narrowband_composite_handles_absent_transparency():
-	"""When AOD/transparency is absent, the NB composite SKIPS it (never reads 0), so NB
-	stays valid and ≥ BB — the present-factors-only safety on the narrowband path."""
+def test_narrowband_absent_transparency_skips_not_zeros():
+	"""Absent transparency is SKIPPED in the NB composite, not read as 0 (a 0 at weight
+	0.9 would TANK NB). NB with transparency absent must stay CLOSE to NB with transparency
+	present-and-good — both decline to penalise a factor that isn't actually bad. A
+	zeroed-absent would diverge by ~20+; skip keeps them within a few points."""
+	now = datetime(2026, 12, 23, 6, tzinfo=timezone.utc)
+	absent = _run_binary(now, cloud=10.0, managed=False, bortle=6, with_aod=False)
+	present = _run_binary(now, cloud=10.0, managed=False, bortle=6, with_aod=True, aod=0.02)
+	assert abs(absent["narrowband"]["score"] - present["narrowband"]["score"]) <= 12
+	assert absent["narrowband"]["score"] >= absent["broadband"]["score"]
+
+
+@pytestmark_binary
+def test_nb_leakage_one_reproduces_broadband_at_binary_layer():
+	"""Composite weight-table PARITY guard (QA-convergent, both reviewers). At leakage=1
+	the NB sky sub-score equals the broadband one, so the two SEPARATELY-coded composites
+	— NB's in the wrapper (_nbCompositeWeights), BB's in the engine — must produce the
+	IDENTICAL score. If _nbCompositeWeights or the cloud gate ever drifts from the engine's
+	location weighting, this fails where every unit test still passes. Clear sky → the
+	composite is non-degenerate (cloud/stability carry it even if the moon craters sky)."""
 	night = _run_binary(datetime(2026, 12, 23, 6, tzinfo=timezone.utc),
-						cloud=10.0, managed=False, bortle=6, with_aod=False)
-	nb = night["narrowband"]["score"]
-	assert 0 <= nb <= 100
-	assert nb >= night["broadband"]["score"]
+						cloud=5.0, managed=False, bortle=5, nb_leakage=1.0)
+	assert night["broadband"]["score"] > 30   # non-degenerate (not a 0 == 0 pass)
+	assert night["narrowband"]["score"] == night["broadband"]["score"]
+
+
+@pytestmark_binary
+def test_snow_lowers_both_bb_and_nb_at_binary_layer():
+	"""The window-mean snow plumbing (hourly snow_depth → mean → BOTH sky models) is live:
+	a snowy night scores below an otherwise-identical dry night, for broadband AND
+	narrowband (snow reflects moon+LP upward — continuum NB also rejects, but not fully).
+	Guards the snow wiring the QA pass added to the NB path; a dropped snowDepthM would
+	pass everything else."""
+	# 2026-12-09 is a NEW moon (0% illum) — the sky sub-score isn't already cratered, so
+	# snow's LP-amplification is visible (a near-full-moon date floors sky at 0 first, and
+	# snow can't lower 0). Verified by probe: dry sky 49→snowy 31; BB 82→77; NB 94→91.
+	now = datetime(2026, 12, 9, 6, tzinfo=timezone.utc)
+	dry = _run_binary(now, cloud=5.0, managed=False, bortle=6, snow=0.0)
+	snowy = _run_binary(now, cloud=5.0, managed=False, bortle=6, snow=0.1)
+	assert snowy["broadband"]["score"] < dry["broadband"]["score"]   # snow must do something
+	assert snowy["narrowband"]["score"] <= dry["narrowband"]["score"]

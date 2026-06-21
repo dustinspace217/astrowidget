@@ -366,9 +366,9 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 }
 
 /// Scores one (site, night) pair: computes dark window, moon geometry,
-/// calls scoreLocation() for the broadband baseline, re-weights for
-/// narrowband, evaluates safety vetoes, and emits the BB/NB/Neither
-/// recommendation.
+/// calls scoreLocation() for the broadband baseline, runs the narrowband
+/// forward model (nb-model-v1), evaluates safety vetoes, and emits the
+/// BB/NB/Neither recommendation.
 Map<String, dynamic> _scoreOneNight({
 	required DateTime referenceDate,
 	required String label,

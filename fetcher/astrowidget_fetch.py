@@ -404,6 +404,22 @@ def load_config() -> dict[str, Any]:
 		else:
 			site["bortle"] = None
 
+		# Optional narrowband leakage override (the NB filter's continuum transmission,
+		# spec DEF-V2-03): a float in (0, 1]; None → the Dart binary uses its 0.05 default
+		# (Antlia 3nm). Validated loudly — a bad value would mis-score every narrowband
+		# verdict. (bool excluded so a stray `true` can't read as leakage 1.0.)
+		if "nb_leakage" in site:
+			lval = site["nb_leakage"]
+			if (isinstance(lval, bool) or not isinstance(lval, (int, float))
+					or not (0 < lval <= 1)):
+				_fail_config(
+					f"Invalid 'nb_leakage' for site '{sid}'",
+					f"nb_leakage must be a number in (0, 1], got {site['nb_leakage']!r}.",
+				)
+			site["nb_leakage"] = float(lval)
+		else:
+			site["nb_leakage"] = None
+
 	# Per-site veto threshold validation. Adversarial review flagged that
 	# wind_max_kmh = -5 (etc.) silently produces "Neither" for every hour —
 	# valid TOML, nonsensical scoring outcome. Reject negative or absurd
@@ -1927,6 +1943,7 @@ def main() -> int:
 		#   bortle  → light-pollution class 1–9, or None (Dart default baseline)
 		managed = site_cfg.get("managed", False)
 		bortle = site_cfg.get("bortle")  # None when not configured
+		nb_leakage = site_cfg.get("nb_leakage")  # None → Dart uses its 0.05 default
 		# Defensive: thresholds section may be missing or non-dict.
 		thresholds_section = cfg.get("thresholds")
 		if not isinstance(thresholds_section, dict):
@@ -2036,6 +2053,7 @@ def main() -> int:
 				# airQuality is the per-hour AOD list ([] when unavailable → the
 				# transparency factor is omitted, not zeroed).
 				"bortle": bortle,
+				"nb_leakage": nb_leakage,
 				"managed": managed,
 				"airQuality": air_quality_rows,
 			})

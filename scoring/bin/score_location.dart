@@ -244,7 +244,7 @@ Future<void> main(List<String> args) async {
 	final out = <String, dynamic>{
 		// Schema 2 (2026-06-03, Phase-1 scoring redesign): factors map is now
 		// {cloud, stability, skyBrightness, transparency?} (darkness/moon removed);
-		// each night gains best_window + managed; NB method is heuristic-reweight-v2.
+		// each night gains best_window + managed; NB method is nb-model-v1 (DEF-V2-03).
 		'schema_version': 2,
 		'computed_at': DateTime.now().toUtc().toIso8601String(),
 		'sites': results,
@@ -510,10 +510,20 @@ Map<String, dynamic> _scoreOneNight({
 	// skipped, never read as 0 — a 0 would resurrect the BB>NB inversion the Phase-1
 	// redesign fixed. Because narrowbandSkyScore ≥ the broadband sky score for every input,
 	// NB ≥ BB falls out (no artificial floor needed).
+	// Mirror the BB sky model's snow input exactly (scoring_engine.dart): the window-mean
+	// ground-snow depth. Snow reflects moon+LP upward — continuum the NB filter also
+	// rejects — so the NB sky must apply the SAME brightening to stay consistent with BB
+	// (and preserve the leakage=1 ≡ BB identity). Omitting it silently overscored snowy
+	// nights (QA workflow 2026-06-20).
+	final meanSnowDepth = windowHours.isEmpty
+		? 0.0
+		: windowHours.map((h) => h.snowDepth).reduce((a, b) => a + b) /
+			windowHours.length;
 	final nbSky = narrowbandSkyScore(
 		bortle: siteBortle,
 		moonIlluminationPercent: moonIllum,
 		moonAltitudeDeg: maxMoonAlt,
+		snowDepthM: meanSnowDepth,
 		leakage: nbLeakage,
 	);
 	final nbScores = <String, int>{
@@ -582,7 +592,7 @@ Map<String, dynamic> _scoreOneNight({
 			'score': nbScore,
 			'verdict': nbVerdict.name,
 			'vetoes': vetoes, // same hard-stop vetoes apply
-			'method': _nbMethod, // 'heuristic-reweight-v2' — not engine-calibrated
+			'method': _nbMethod, // 'nb-model-v1' — real forward model, first-principles-uncalibrated
 		},
 		// Best clear-sky window within the dark window (≤30% cloud), or null if
 		// none. The structured form of the localized "Best window" reason — the

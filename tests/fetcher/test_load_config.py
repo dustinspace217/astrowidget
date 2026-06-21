@@ -7,7 +7,6 @@ users see misconfiguration immediately.
 """
 
 import os
-import stat
 import textwrap
 from pathlib import Path
 from unittest.mock import patch
@@ -177,3 +176,36 @@ def test_load_config_rejects_non_bool_primary(tmp_path, monkeypatch):
 			fx.load_config()
 	assert ei.value.code == 2
 	assert "primary" in nf.call_args.args[0]
+
+
+def test_load_config_nb_leakage_valid(tmp_path, monkeypatch):
+	"""A valid per-site nb_leakage (0 < x ≤ 1) is accepted and floated through to the
+	scoring payload (DEF-V2-03 narrowband filter override)."""
+	cfg = VALID_CONFIG + "\nnb_leakage = 0.04\n"
+	cfg_path = _write_config(tmp_path, cfg, mode=0o600)
+	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
+	with patch.object(fx, "_notify"):
+		loaded = fx.load_config()
+	assert loaded["sites"][0]["nb_leakage"] == 0.04
+
+
+def test_load_config_nb_leakage_absent_defaults_none(tmp_path, monkeypatch):
+	"""No nb_leakage → None (the Dart binary then uses its 0.05 default)."""
+	cfg_path = _write_config(tmp_path, VALID_CONFIG, mode=0o600)
+	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
+	with patch.object(fx, "_notify"):
+		loaded = fx.load_config()
+	assert loaded["sites"][0]["nb_leakage"] is None
+
+
+@pytest.mark.parametrize("bad", ["0", "1.5", '"x"', "true"])
+def test_load_config_rejects_bad_nb_leakage(tmp_path, monkeypatch, bad):
+	"""nb_leakage outside (0, 1], non-numeric, or a bool is rejected loudly (exit 2) —
+	a typo would otherwise mis-score every narrowband verdict."""
+	cfg = VALID_CONFIG + f"\nnb_leakage = {bad}\n"
+	cfg_path = _write_config(tmp_path, cfg, mode=0o600)
+	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
+	with patch.object(fx, "_notify"):
+		with pytest.raises(SystemExit) as ei:
+			fx.load_config()
+	assert ei.value.code == 2

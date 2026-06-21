@@ -246,7 +246,7 @@ if os.environ.get("ASTROWIDGET_REQUIRE_BINARY") == "1" and not fx.SCORING_BINARY
 def _run_binary(now_utc: datetime, *, cloud: float, managed: bool,
 				bortle=5, precip=5.0, with_aod=True, with_250=True,
 				wind=6.0, wind_pattern=None, precip_null_every=None,
-				aod=0.06, thresholds=None) -> dict:
+				aod=0.06, thresholds=None, nb_leakage=None) -> dict:
 	"""Crafts one stdin payload, runs the real binary, returns tonight's night dict.
 
 	Extras (QA 2026-06-09 veto tests): `wind_pattern` cycles a list of wind
@@ -285,6 +285,8 @@ def _run_binary(now_utc: datetime, *, cloud: float, managed: bool,
 			"managed": managed, "hourly": hours, "airQuality": aq}
 	if bortle is not None:
 		site["bortle"] = bortle
+	if nb_leakage is not None:
+		site["nb_leakage"] = nb_leakage
 	if thresholds is not None:
 		site["thresholds"] = thresholds
 	payload = {"now_utc": now_utc.isoformat(), "sites": [site]}
@@ -561,3 +563,25 @@ def test_narrowband_cloud_gate_still_caps():
 	night = _run_binary(datetime(2026, 12, 23, 6, tzinfo=timezone.utc),
 						cloud=92.0, managed=False, bortle=5)
 	assert night["narrowband"]["score"] <= 40   # heavy cloud → at best marginal
+
+
+@pytestmark_binary
+def test_nb_leakage_override_is_wired_end_to_end():
+	"""The nb_leakage stdin override reaches the model: a SMALLER leakage (more continuum
+	rejection) yields a HIGHER narrowband score. Bortle 8 gives light pollution to reject,
+	making NB leakage-sensitive. Guards the end-to-end plumbing (config → payload → binary)."""
+	now = datetime(2026, 12, 23, 6, tzinfo=timezone.utc)
+	tight = _run_binary(now, cloud=5.0, managed=False, bortle=8, nb_leakage=0.01)
+	loose = _run_binary(now, cloud=5.0, managed=False, bortle=8, nb_leakage=0.5)
+	assert tight["narrowband"]["score"] > loose["narrowband"]["score"]
+
+
+@pytestmark_binary
+def test_narrowband_composite_handles_absent_transparency():
+	"""When AOD/transparency is absent, the NB composite SKIPS it (never reads 0), so NB
+	stays valid and ≥ BB — the present-factors-only safety on the narrowband path."""
+	night = _run_binary(datetime(2026, 12, 23, 6, tzinfo=timezone.utc),
+						cloud=10.0, managed=False, bortle=6, with_aod=False)
+	nb = night["narrowband"]["score"]
+	assert 0 <= nb <= 100
+	assert nb >= night["broadband"]["score"]

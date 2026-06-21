@@ -46,6 +46,11 @@ int narrowbandSkyScore({
 	double snowDepthM = 0.0,
 	double leakage = nbLeakageDefault,
 }) {
+	// Guard the one external knob. A negative leakage (a plausible config typo — it's a
+	// user-facing 0-1 fraction) makes nbFluxRatio ≤ 0 → log(NaN) → skyBrightnessScore's
+	// .round() throws a Dart Error that aborts the WHOLE run, not a per-site error. >1 is
+	// unphysical (>100% continuum transmission). Clamp to [0, 1].
+	final l = leakage.clamp(0.0, 1.0);
 	final baseSb = zenithSkyBrightness(bortle) ?? _defaultZenithSb;
 	final burden = moonBurden(
 		illuminationPercent: moonIlluminationPercent,
@@ -60,7 +65,7 @@ int narrowbandSkyScore({
 
 	// Reject the continuum in FLUX space: the filter sees only `leakage` of the excess.
 	final bbExcessFlux = math.pow(10, bbBrightening / 2.5).toDouble() - 1.0;
-	final nbFluxRatio = 1.0 + leakage * bbExcessFlux;
+	final nbFluxRatio = 1.0 + l * bbExcessFlux;
 	final nbBrightening = 2.5 * (math.log(nbFluxRatio) / math.ln10); // back to mag
 	final nbEffectiveSb = _pristineSb - nbBrightening;
 	return skyBrightnessScore(nbEffectiveSb);

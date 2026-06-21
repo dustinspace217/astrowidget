@@ -6,7 +6,7 @@ behaviours that motivated the redesign:
   - the reported incident (heavy cloud at a HOME site read green BB+NB);
   - the BB>NB inversion under a bright moon (narrowband should beat broadband);
   - the new schema (factors = {cloud, stability, skyBrightness, transparency?};
-    no more `darkness`/`moon`; best_window + managed per night; NB method v2);
+    no more `darkness`/`moon`; best_window + managed per night; NB method nb-model-v1);
   - the HOME/REMOTE precip-veto split;
   - graceful degradation when the optional feeds (AOD, 250 hPa, Bortle) are absent.
 
@@ -385,45 +385,40 @@ def test_missing_precip_hours_do_not_fabricate_a_veto():
 
 
 @pytestmark_binary
-def test_bb_pass_implies_nb_pass_floor():
-	"""QA 2026-06-09: BB-viable ⇒ NB-viable — narrowband tolerates everything
-	broadband does (it REJECTS the moonlight/LP broadband needs gone). The v2
-	NB re-weights can SCORE NB below BB on dark, poor-transparency nights,
-	which used to collapse a BB-passing night to 'Neither' (impossible
-	physics). Invariant sweep: any un-vetoed night whose broadband reads
-	good+ must recommend BB+NB — including high-AOD configs that hit the
-	NB<BB scoring region. Asserts the invariant actually fired (non-vacuous)."""
+def test_nb_ge_bb_invariant_and_bb_pass_recommends_both():
+	"""nb-model-v1 makes NB ≥ BB STRUCTURAL: the NB composite swaps in an NB-correct sky
+	sub-score (≥ the broadband one) under the same weights + cloud gate, so NB can never
+	score below BB. (The old v2 re-weight COULD score NB below BB on dark, poor-transparency
+	nights — which needed a recommendation floor; the model now guarantees the relation, so
+	the old 'NB<good while BB passes' region is empty BY DESIGN, not by patch.) Sweep: every
+	un-vetoed night has NB ≥ BB, and any broadband-passing night recommends BB+NB.
+	Non-vacuous: asserts the BB-passing region fired."""
 	now = datetime(2026, 12, 9, 6, tzinfo=timezone.utc)
 	fired = 0
-	floor_exercised = 0
 	for aod in (0.06, 0.5, 0.9):
 		for cloud in (5.0, 20.0):
 			night = _run_binary(now, cloud=cloud, managed=False, bortle=3, aod=aod)
 			bb = night["broadband"]
+			nb = night["narrowband"]
+			# Structural invariant: NB never below BB (the model guarantees it).
+			assert nb["score"] >= bb["score"], (
+				f"aod={aod} cloud={cloud}: NB {nb['score']} < BB {bb['score']} — "
+				"the nb-model-v1 NB ≥ BB guarantee is broken"
+			)
 			if bb["score"] >= 60 and not bb["vetoes"]:
 				fired += 1
-				# The floor only DOES anything where NB scores below 'good'
-				# while BB passes — count those, or a recalibration could
-				# empty the region and leave the floor decoratively tested
-				# (QA Phase B 2026-06-09: fired>0 guards the wrong axis).
-				if night["narrowband"]["score"] < 60:
-					floor_exercised += 1
 				assert night["recommendation"] == "BB+NB", (
 					f"aod={aod} cloud={cloud}: broadband passes "
 					f"(score {bb['score']}) but recommendation is "
 					f"{night['recommendation']}"
 				)
 	assert fired > 0, "sweep never produced a passing broadband night — vacuous test"
-	assert floor_exercised > 0, (
-		"sweep never hit the NB<good-while-BB-passes region the floor exists "
-		"for — widen the sweep (engine recalibration?) or the floor is untested"
-	)
 
 
 @pytestmark_binary
 def test_schema_factor_set_changed():
 	"""factors = {cloud, stability, skyBrightness, transparency?}; no darkness/moon.
-	best_window + managed present; NB method is v2."""
+	best_window + managed present; NB method is nb-model-v1."""
 	night = _run_binary(datetime(2026, 6, 9, 20, tzinfo=timezone.utc),
 						 cloud=15.0, managed=False)
 	factors = night["broadband"]["factors"]
@@ -431,7 +426,7 @@ def test_schema_factor_set_changed():
 	assert "skyBrightness" in factors
 	assert "best_window" in night
 	assert night["managed"] is False
-	assert night["narrowband"]["method"] == "heuristic-reweight-v2"
+	assert night["narrowband"]["method"] == "nb-model-v1"
 
 
 @pytestmark_binary
@@ -530,3 +525,39 @@ def test_tonight_window_is_in_progress_or_future_at_late_evening():
 	night = _run_binary(now, cloud=10.0, managed=False)
 	end = datetime.fromisoformat(night["dark_window"]["end"].replace("Z", "+00:00"))
 	assert end > now, f"Tonight's window already ended at {end} (now {now})"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Narrowband: the real forward model (nb-model-v1, DEF-V2-03, 2026-06-20). Moon
+# illumination is DATE-computed by the binary (not a payload field), so these drive
+# the NB-vs-BB contrast with `bortle` light-pollution and rely on the NB ≥ BB invariant.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytestmark_binary
+def test_narrowband_model_tag_and_invariant():
+	"""The NB path is the real model (nb-model-v1) and never scores below broadband —
+	narrowband tolerates everything broadband does (it rejects the moon/LP broadband
+	needs gone)."""
+	night = _run_binary(datetime(2026, 12, 23, 6, tzinfo=timezone.utc),
+						cloud=5.0, managed=False, bortle=5)
+	assert night["narrowband"]["method"] == "nb-model-v1"
+	assert night["narrowband"]["score"] >= night["broadband"]["score"]
+
+
+@pytestmark_binary
+def test_narrowband_rejects_light_pollution():
+	"""At a bright (Bortle 8) site under clear sky, broadband is dragged down by light
+	pollution but narrowband rejects it — NB strictly beats BB. This is the real-model
+	behaviour the heuristic re-weight only approximated."""
+	night = _run_binary(datetime(2026, 12, 23, 6, tzinfo=timezone.utc),
+						cloud=5.0, managed=False, bortle=8)
+	assert night["narrowband"]["score"] > night["broadband"]["score"]
+
+
+@pytestmark_binary
+def test_narrowband_cloud_gate_still_caps():
+	"""Opaque cloud blocks emission lines too — NB stays capped at the cloud factor,
+	never reads 'good' through heavy cloud despite the moon/LP-immune sky."""
+	night = _run_binary(datetime(2026, 12, 23, 6, tzinfo=timezone.utc),
+						cloud=92.0, managed=False, bortle=5)
+	assert night["narrowband"]["score"] <= 40   # heavy cloud → at best marginal

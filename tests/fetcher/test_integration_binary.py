@@ -190,10 +190,9 @@ def test_real_binary_pipeline_surfaces_astrospheric_and_tags(tmp_path):
 	assert df["seeing"]["label"] == "Above Average"
 	assert df["transparency"]["label"] == "Excellent"
 
-	# Fix #5 guard: narrowband carries the honest heuristic method tag. Bumped to
-	# v2 in the Phase-1 scoring redesign — the NB factor set changed (darkness/moon
-	# removed; skyBrightness + transparency added), so the heuristic is a new version.
-	assert tonight["narrowband"]["method"] == "heuristic-reweight-v2"
+	# Fix #5 guard: narrowband carries its method tag. nb-model-v1 (DEF-V2-03) — the NB
+	# verdict is now a real forward model (NB-correct sky sub-score), not a re-weight.
+	assert tonight["narrowband"]["method"] == "nb-model-v1"
 
 	# Fix #4 guard: the +2 night has a real dark window (covered by 4-day fcst),
 	# not a degenerate/empty one.

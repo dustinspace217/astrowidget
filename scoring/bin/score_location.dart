@@ -36,43 +36,31 @@ import 'package:astrowidget_scoring/astro/visibility.dart';
 import 'package:astrowidget_scoring/scoring/scoring_engine.dart';
 import 'package:astrowidget_scoring/scoring/veto_evaluator.dart';
 import 'package:astrowidget_scoring/weather/weather_models.dart';
+import 'narrowband.dart'; // astrowidget's own NB sky model (DEF-V2-03)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Narrowband re-weighting constants
+// Narrowband composite
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Narrowband score — HEURISTIC, NOT a calibrated engine mode.
+// Narrowband is now a REAL forward model (nb-model-v1, spec 2026-06-20), not the old
+// heuristic re-weight. Only SKY BRIGHTNESS is filter-dependent — a narrowband filter
+// rejects ~99% of the moon/LP/twilight continuum, so its sky background is far darker
+// than broadband (this is why Ha works under a gibbous moon). Cloud, stability, and
+// transparency block emission lines just like broadband, so those sub-scores carry over
+// unchanged. So the NB verdict is: swap the engine's broadband skyBrightness sub-score
+// for narrowbandSkyScore() (narrowband.dart), then re-composite with the SAME location
+// weights the engine uses. Because narrowbandSkyScore ≥ the broadband sky score for every
+// input, NB ≥ BB falls out of the model — no artificial floor.
 //
-// IMPORTANT HONESTY NOTE (2026-05-28, updated 2026-06-03 for the Phase-1 factor
-// set): scoreLocation() has no narrowband-aware path, so this wrapper computes a
-// heuristic NB score by re-weighting the broadband run's already-computed factor
-// sub-scores. The Phase-1 redesign changed the factor set to
-// {cloud, stability, skyBrightness, transparency?} — `darkness` was removed (it was
-// a constant 100 that inflated every score) and the moon now lives INSIDE
-// skyBrightness as a geometry-aware burden. The NB re-weight reflects the physics
-// that narrowband filters pass ~1 nm around emission lines and reject ~99% of
-// moonlight + light pollution, so SKY BRIGHTNESS barely matters for NB (weight 0.08
-// vs 0.8 broadband — spec §5a's ×0.05–0.10; THIS factor is the BB/NB axis), while
-// TRANSPARENCY (haze/smoke that blocks the emission lines themselves) matters about
-// as much as for broadband (0.9). Cloud is a hard blocker either way (1.0).
-//
-// The WEIGHTS THEMSELVES ARE UNCALIBRATED first-principles estimates, not derived
-// from imaging outcomes like the engine's broadband constants. Output is tagged
-// `method: "heuristic-reweight-v2"` (bumped from v1 — the factor set changed) so
-// consumers know not to over-trust the NB number relative to the broadband score.
-//
-// Mathematically the re-weight is a weighted mean over the PRESENT factors only —
-// an absent factor (e.g. transparency when there's no AOD) is SKIPPED, never scored
-// as 0. A 0 would drag NB below BB and resurrect the very BB>NB inversion this
-// redesign fixes (the bug the Phase-1 verifiers caught). It is NOT equivalent to
-// re-running the engine with narrowband-aware factor scoring — there is no such path.
-const Map<String, double> _nbWeights = <String, double>{
+// These mirror scoreLocation's location weights (scoring_engine.dart) — keep in sync.
+// When this refinement back-ports to astroplan they become the engine's NB-mode weights.
+const Map<String, double> _nbCompositeWeights = <String, double>{
 	'cloud': 1.0,
-	'stability': 0.65,
-	'skyBrightness': 0.08, // NB rejects ~99% of moonlight/LP — spec §5a
-	'transparency': 0.9,   // haze blocks emission lines too — matters like BB
+	'stability': 0.6,
+	'skyBrightness': 0.8,
+	'transparency': 0.9,
 };
-const String _nbMethod = 'heuristic-reweight-v2';
+const String _nbMethod = 'nb-model-v1';
 
 /// Equipment-protection precipitation veto: fires when the PEAK (maximum)
 /// precipitation probability across the exposure (sunset→sunrise) window
@@ -286,6 +274,9 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 	//   managed — HOME (false) vs REMOTE/dome (true). A REMOTE dome is weatherproof,
 	//             so it skips the precip EQUIPMENT veto (applied in _scoreOneNight).
 	final siteBortle = (site['bortle'] as num?)?.toInt();
+	// Optional per-site narrowband leakage override (filter-bandwidth tuning); the
+	// fetcher passes it from config.toml when set. Absent → the physics default (0.05).
+	final nbLeakage = (site['nb_leakage'] as num?)?.toDouble() ?? nbLeakageDefault;
 	final managed = site['managed'] as bool? ?? false;
 
 	// Per-site veto thresholds with sensible defaults.
@@ -358,6 +349,7 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 			lat: lat,
 			lon: lon,
 			siteBortle: siteBortle,
+			nbLeakage: nbLeakage,
 			managed: managed,
 			windMaxKmh: windMaxKmh,
 			precipMaxPct: precipMaxPct,
@@ -384,6 +376,7 @@ Map<String, dynamic> _scoreOneNight({
 	required double lat,
 	required double lon,
 	required int? siteBortle,
+	required double nbLeakage,
 	required bool managed,
 	required double windMaxKmh,
 	required double precipMaxPct,
@@ -510,28 +503,37 @@ Map<String, dynamic> _scoreOneNight({
 		? const <Map<String, String>>[]
 		: <Map<String, String>>[{'name': firedVeto.vetoName, 'reason': firedVeto.reason}];
 
-	// Narrowband: re-weight the engine's PRESENT factor scores with _nbWeights.
-	// Iterate the factors actually present (fix 2) — an absent factor (e.g.
-	// transparency with no AOD, or any factor a future engine version drops) is
-	// SKIPPED, never read as 0. A 0 would drag NB below BB and resurrect the
-	// inversion this redesign fixes. skyBrightness's tiny NB weight (0.08) is what
-	// makes NB exceed BB under a bright moon — the BB/NB axis.
+	// Narrowband — real forward model (nb-model-v1, spec 2026-06-20). Swap the engine's
+	// broadband skyBrightness sub-score for an NB-correct one (narrowbandSkyScore — the
+	// filter rejects ~all of the moon/LP continuum), then composite with the SAME location
+	// weights the engine uses. Present-factors-only: an absent transparency (no AOD) is
+	// skipped, never read as 0 — a 0 would resurrect the BB>NB inversion the Phase-1
+	// redesign fixed. Because narrowbandSkyScore ≥ the broadband sky score for every input,
+	// NB ≥ BB falls out (no artificial floor needed).
+	final nbSky = narrowbandSkyScore(
+		bortle: siteBortle,
+		moonIlluminationPercent: moonIllum,
+		moonAltitudeDeg: maxMoonAlt,
+		leakage: nbLeakage,
+	);
+	final nbScores = <String, int>{
+		'cloud': loc.factorScores['cloud'] ?? 0,
+		'stability': loc.factorScores['stability'] ?? 0,
+		'skyBrightness': nbSky,
+	};
+	if (loc.factorScores.containsKey('transparency')) {
+		nbScores['transparency'] = loc.factorScores['transparency']!;
+	}
 	var nbWeightedSum = 0.0;
 	var nbTotalW = 0.0;
-	loc.factorScores.forEach((key, score) {
-		final w = _nbWeights[key];
-		if (w == null) return; // factor not part of the NB model — skip it
+	nbScores.forEach((key, score) {
+		final w = _nbCompositeWeights[key]!;
 		nbWeightedSum += w * score;
 		nbTotalW += w;
 	});
-	final nbRaw = nbTotalW > 0
-		? (nbWeightedSum / nbTotalW).round().clamp(0, 100)
-		: 0;
-	// Same CLOUD GATE the engine applies to broadband (spec §1): opaque cloud blocks
-	// emission lines too, so narrowband can't beat the cloud factor either. Without
-	// this, the tiny skyBrightness NB weight lets a clear-sky-ish NB read "good" at
-	// heavy cloud. Cap NB at the cloud sub-score (no dart:math import here — a plain
-	// min via ternary).
+	final nbRaw = (nbWeightedSum / nbTotalW).round().clamp(0, 100);
+	// Cloud gate: opaque cloud blocks emission lines too, so narrowband can't beat the
+	// cloud sub-score either (the same cap the engine applies to broadband).
 	final cloudFactor = loc.factorScores['cloud'] ?? 0;
 	final nbScore = nbRaw < cloudFactor ? nbRaw : cloudFactor;
 	final nbVerdict = Verdict.fromScore(nbScore);
@@ -546,13 +548,11 @@ Map<String, dynamic> _scoreOneNight({
 		(loc.verdict == Verdict.excellent || loc.verdict == Verdict.good);
 	final nbPass = vetoes.isEmpty &&
 		(nbVerdict == Verdict.excellent || nbVerdict == Verdict.good);
-	// NB is physically never WORSE than BB: narrowband tolerates everything
-	// broadband does (it REJECTS the moonlight/LP that broadband needs gone),
-	// so BB-viable ⇒ NB-viable. The v2 NB re-weighting can still SCORE NB a
-	// few points below BB on a dark, poor-transparency night, which used to
-	// collapse a BB-passing night to 'Neither' — impossible physics (QA
-	// 2026-06-09). Floor the RECOMMENDATION on that implication; the displayed
-	// NB score itself stays un-floored and honest.
+	// NB is physically never WORSE than BB, and nb-model-v1 makes that STRUCTURAL: the
+	// NB composite swaps in an NB-correct sky sub-score (≥ the broadband one) under the
+	// same weights + cloud gate, so nbScore ≥ bbScore for every input. So bbPass ⇒ nbPass
+	// already — the `bbPass ? BB+NB` clause is exact, not a floor patching imperfect
+	// scoring (the old v2 re-weight could score NB a few points below BB; this replaces it).
 	final recommendation = bbPass
 		? 'BB+NB'
 		: nbPass

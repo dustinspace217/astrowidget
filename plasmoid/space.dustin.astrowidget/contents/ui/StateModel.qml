@@ -59,19 +59,43 @@ QtObject {
 		engine: "executable"
 		connectedSources: []
 		onNewData: (sourceName, data) => {
-			disconnectSource(sourceName); // run-once per refresh
-			model._refreshWatchdog.stop();
+			// Clear UI state FIRST: the spinner/disabled-button is the highest
+			// blast-radius thing to leave wedged, so it must not depend on any
+			// line below succeeding.
 			model.refreshing = false;
+			model._refreshWatchdog.stop();
+			disconnectSource(sourceName); // run-once per refresh
+			// Exit-code key + int type verified against plasma5support
+			// executable.cpp (setData(QStringLiteral("exit code"), exitCode)),
+			// so `=== 0` is correct for the happy path. We still handle a
+			// MISSING code explicitly rather than mislabel a possibly-successful
+			// fetch as "exit undefined".
 			const code = data["exit code"];
 			if (code === 0) {
-				// Fetch succeeded → re-read state.json. The "Updated HH:mm"
-				// label rebinds itself once the new state parses.
+				// Success → clear any stale error (e.g. a "timed out" banner a
+				// watchdog set on a late completion) and re-read state.json. The
+				// fetcher writes atomically (.tmp + os.replace), so this cat
+				// can't see a torn file; a genuine read failure surfaces via
+				// loadError (→ toolTipSummary), not silently.
+				model.refreshError = "";
 				model.reload();
+			} else if (code === undefined || code === null) {
+				// Completion signalled with no exit code — we cannot tell
+				// success from failure. Re-read anyway (the fetch may have
+				// written) and tell the user how to check.
+				model.refreshError = qsTr(
+					"Refresh finished without an exit status — verify: systemctl --user status astrowidget-fetch.service");
+				model.reload();
+				console.warn("astrowidget: manual refresh completed with no exit code; data keys:",
+					Object.keys(data));
 			} else {
+				// Non-zero exit → show stderr if present, else the exit code plus
+				// the same diagnostic command the watchdog suggests, so "exit 5"
+				// alone is never the whole story.
 				const err = (data["stderr"] || "").trim();
 				model.refreshError = err.length > 0
 					? err
-					: qsTr("Refresh failed (systemctl exit %1)").arg(code);
+					: qsTr("Refresh failed (systemctl exit %1) — check: systemctl --user status astrowidget-fetch.service").arg(code);
 				console.warn("astrowidget: manual refresh failed:", code, err);
 			}
 		}
@@ -136,10 +160,18 @@ QtObject {
 
 	// Last manual-refresh trigger error ("" when clear). Distinct from
 	// loadError (which is about READING state.json) — this is about TRIGGERING
-	// the fetch. Surfaced inline in the popup header so a failed refresh is
-	// visible without hover, per the project "every error tells the user what
-	// went wrong" standard. Cleared at the start of the next refresh().
+	// the fetch. Surfaced inline in the popup header AND in toolTipSummary (so a
+	// failure from the right-click action, with the popup closed, is still
+	// visible) per the project "every error tells the user what went wrong"
+	// standard. Cleared at the start of the next refresh() and on success.
 	property string refreshError: ""
+
+	// The manual-refresh command. Single source of truth so refresh() (which
+	// connects it) and the watchdog (which must disconnect this EXACT source
+	// string on timeout, so a later refresh re-running the same command isn't
+	// coalesced into the stale connection) always agree on the string.
+	readonly property string _refreshCommand:
+		"systemctl --user start astrowidget-fetch.service"
 
 	// Set true when state.json schemaVersion is newer than this widget knows
 	// how to render. Lets the QML show a "widget out of date" warning rather
@@ -164,6 +196,12 @@ QtObject {
 	readonly property string toolTipSummary: {
 		if (loadError) {
 			return qsTr("Error: %1").arg(loadError);
+		}
+		// A failed manual refresh (especially from the right-click action, with
+		// the popup closed) surfaces here too — otherwise it'd be visible only
+		// in the open popup. The messages are self-describing, so no prefix.
+		if (refreshError) {
+			return refreshError;
 		}
 		if (isFutureSchema) {
 			return qsTr("state.json schema is newer than this widget — please upgrade.");
@@ -199,14 +237,17 @@ QtObject {
 	// is static (no user input) so it needs no quoting. Result handled in
 	// _refresher.onNewData.
 	function refresh() {
+		// Guard: a second trigger while one is in flight is a no-op. Safe
+		// without a lock because this check-and-set is atomic in QML's single-
+		// threaded event loop — do NOT insert an await / Qt.callLater between
+		// the check and the set, which would open a TOCTOU window.
 		if (model.refreshing) {
 			return;
 		}
 		model.refreshError = "";
 		model.refreshing = true;
 		model._refreshWatchdog.restart();
-		model._refresher.connectSource(
-			"systemctl --user start astrowidget-fetch.service");
+		model._refresher.connectSource(model._refreshCommand);
 	}
 
 	// Background poll. 30 s cadence is plenty given the fetcher's 4×/day write.
@@ -226,6 +267,11 @@ QtObject {
 		interval: 130 * 1000
 		repeat: false
 		onTriggered: {
+			// The completion never arrived. Release the still-connected source
+			// so a later refresh() re-running the SAME command string isn't
+			// coalesced into / blocked by this stale connection, then clear the
+			// spinner and tell the user how to investigate.
+			model._refresher.disconnectSource(model._refreshCommand);
 			model.refreshing = false;
 			model.refreshError = qsTr(
 				"Refresh timed out — check: systemctl --user status astrowidget-fetch.service");

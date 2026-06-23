@@ -47,6 +47,36 @@ QtObject {
 		}
 	}
 
+	// Second executable DataSource, dedicated to the manual-refresh trigger.
+	// Runs `systemctl --user start astrowidget-fetch.service` — the SAME unit
+	// the timer activates (timer → service → astrowidget_fetch.py). systemctl
+	// start on a Type=oneshot unit BLOCKS until the fetch finishes and returns
+	// its exit code, so onNewData fires once on completion. Kept separate from
+	// _reader so its stdout/exit-code payload never reaches the JSON parser.
+	// Verified exit-code key against plasma5support executable.cpp:
+	// setData(QStringLiteral("exit code"), exitCode) — note the space.
+	property P5Support.DataSource _refresher: P5Support.DataSource {
+		engine: "executable"
+		connectedSources: []
+		onNewData: (sourceName, data) => {
+			disconnectSource(sourceName); // run-once per refresh
+			model._refreshWatchdog.stop();
+			model.refreshing = false;
+			const code = data["exit code"];
+			if (code === 0) {
+				// Fetch succeeded → re-read state.json. The "Updated HH:mm"
+				// label rebinds itself once the new state parses.
+				model.reload();
+			} else {
+				const err = (data["stderr"] || "").trim();
+				model.refreshError = err.length > 0
+					? err
+					: qsTr("Refresh failed (systemctl exit %1)").arg(code);
+				console.warn("astrowidget: manual refresh failed:", code, err);
+			}
+		}
+	}
+
 	// Parses cat's stdout into the state object. Empty stdout => the file is
 	// missing or unreadable (cat printed nothing) => surface a loadError
 	// rather than silently keeping stale state.
@@ -97,6 +127,19 @@ QtObject {
 	// failed (file missing, malformed JSON, version mismatch). The plasmoid
 	// surfaces this via tooltip / popup so failures aren't silent.
 	property string loadError: ""
+
+	// ── Manual refresh state ─────────────────────────────────────────────
+	// True while a manual fetch is running (systemctl start blocking on the
+	// oneshot unit). Drives the header button's disabled/busy state and guards
+	// refresh() against double-launch.
+	property bool refreshing: false
+
+	// Last manual-refresh trigger error ("" when clear). Distinct from
+	// loadError (which is about READING state.json) — this is about TRIGGERING
+	// the fetch. Surfaced inline in the popup header so a failed refresh is
+	// visible without hover, per the project "every error tells the user what
+	// went wrong" standard. Cleared at the start of the next refresh().
+	property string refreshError: ""
 
 	// Set true when state.json schemaVersion is newer than this widget knows
 	// how to render. Lets the QML show a "widget out of date" warning rather
@@ -150,12 +193,44 @@ QtObject {
 		_reader.connectSource("cat \"" + statePath + "\"");
 	}
 
+	// Trigger a manual fetch via the systemd user service. Guards on refreshing
+	// (a second click while one is in flight is a no-op), clears any prior
+	// error, arms the watchdog, then connects the systemctl source. The command
+	// is static (no user input) so it needs no quoting. Result handled in
+	// _refresher.onNewData.
+	function refresh() {
+		if (model.refreshing) {
+			return;
+		}
+		model.refreshError = "";
+		model.refreshing = true;
+		model._refreshWatchdog.restart();
+		model._refresher.connectSource(
+			"systemctl --user start astrowidget-fetch.service");
+	}
+
 	// Background poll. 30 s cadence is plenty given the fetcher's 4×/day write.
 	property Timer _pollTimer: Timer {
 		interval: 30 * 1000
 		running: true
 		repeat: true
 		onTriggered: model.reload()
+	}
+
+	// Watchdog bounding the external wait. Fires ONLY if no completion signal
+	// arrives from _refresher (e.g. the executable engine drops the job). The
+	// fetch itself is already bounded by the service's TimeoutStartSec=120, so
+	// 130 s leaves headroom for systemd's own SIGKILL + teardown to report back.
+	// On fire: clear the stuck spinner and tell the user how to investigate.
+	property Timer _refreshWatchdog: Timer {
+		interval: 130 * 1000
+		repeat: false
+		onTriggered: {
+			model.refreshing = false;
+			model.refreshError = qsTr(
+				"Refresh timed out — check: systemctl --user status astrowidget-fetch.service");
+			console.warn("astrowidget: manual refresh watchdog fired");
+		}
 	}
 
 	Component.onCompleted: model.reload()

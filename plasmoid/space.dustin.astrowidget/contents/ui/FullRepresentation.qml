@@ -176,6 +176,29 @@ Item {
 				QQC2.TabButton { text: qsTr("+2 nights") }
 			}
 
+			// Manual refresh: runs the systemd fetch unit (StateModel.refresh).
+			// Disabled + spinner while a fetch is in flight; the IconOnly
+			// ToolButton keeps "Refresh now" as its accessible name + tooltip.
+			PlasmaComponents.ToolButton {
+				icon.name: "view-refresh"
+				display: QQC2.AbstractButton.IconOnly
+				text: qsTr("Refresh now")
+				enabled: !full.stateModel.refreshing
+				onClicked: full.stateModel.refresh()
+
+				QQC2.ToolTip.text: text
+				QQC2.ToolTip.visible: hovered
+				QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+
+				PlasmaComponents.BusyIndicator {
+					anchors.centerIn: parent
+					width: Math.round(parent.width * 0.7)
+					height: width
+					visible: full.stateModel.refreshing
+					running: visible
+				}
+			}
+
 			PlasmaComponents.Label {
 				text: full.stateModel.state.lastUpdated
 					? qsTr("Updated %1").arg(
@@ -189,6 +212,18 @@ Item {
 					? Kirigami.Theme.neutralTextColor
 					: Kirigami.Theme.textColor
 			}
+		}
+
+		// Inline manual-refresh error. Its own row (not in the header) so a
+		// long systemctl error never squeezes the title/tabs. Negative theme
+		// color; clears itself when the next refresh starts.
+		PlasmaComponents.Label {
+			Layout.fillWidth: true
+			visible: full.stateModel.refreshError.length > 0
+			text: full.stateModel.refreshError
+			color: Kirigami.Theme.negativeTextColor
+			font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+			wrapMode: Text.WordWrap
 		}
 
 		// ── Per-site columns ─────────────────────────────────────────────
@@ -263,11 +298,19 @@ Item {
 						text: qsTr("No forecast data yet.\nRun the fetcher to populate.")
 						horizontalAlignment: Text.AlignHCenter
 					}
+					PlasmaComponents.Button {
+						Layout.alignment: Qt.AlignHCenter
+						icon.name: "view-refresh"
+						text: qsTr("Run fetcher now")
+						enabled: !full.stateModel.refreshing
+						onClicked: full.stateModel.refresh()
+					}
 					PlasmaComponents.Label {
 						Layout.alignment: Qt.AlignHCenter
 						text: qsTr("systemctl --user start astrowidget-fetch.service")
 						font.family: "monospace"
 						opacity: 0.7
+						font.pixelSize: Kirigami.Theme.smallFont.pixelSize
 					}
 				}
 			}

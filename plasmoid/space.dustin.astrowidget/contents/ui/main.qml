@@ -37,6 +37,19 @@ PlasmoidItem {
 		? PlasmaCore.Types.NeedsAttentionStatus
 		: PlasmaCore.Types.PassiveStatus
 
+	// Right-click menu entry so the fetch can be triggered from the panel
+	// without opening the popup. Calls the same StateModel.refresh() the header
+	// button uses. Disabled while a fetch is in flight (refresh() also guards).
+	// Plasma 6 shape verified against the installed systemmonitor plasmoid.
+	Plasmoid.contextualActions: [
+		PlasmaCore.Action {
+			text: qsTr("Refresh now")
+			icon.name: "view-refresh"
+			enabled: !model.refreshing
+			onTriggered: model.refresh()
+		}
+	]
+
 	// compactRepresentation / fullRepresentation are item-valued properties on
 	// the root PlasmoidItem (NOT Plasmoid.-prefixed, NOT Component-wrapped) —
 	// this matches every installed Plasma 6 reference plasmoid (kdeconnect,

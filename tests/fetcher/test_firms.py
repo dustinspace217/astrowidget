@@ -99,3 +99,21 @@ def test_fetch_fires_nearby_raises_firms_error_on_http_failure():
 					  side_effect=requests.RequestException("503")):
 		with pytest.raises(firms.FirmsError):
 			firms.fetch_fires_nearby(0.0, 0.0, "fakekey")
+
+
+def test_fetch_fires_nearby_uses_day_range_2():
+	"""DAY_RANGE must be 2, not 1: a 1-day window misses the PRIOR UTC day's
+	detections after the date rolls at night — the 2026-06-25 UDRO case (a fire
+	54 km away, detected on the prior UTC day, invisible at day-range 1)."""
+	captured = {}
+	resp = MagicMock()
+	resp.text = "latitude,longitude,bright_ti4,frp,confidence,acq_date\n"
+	resp.raise_for_status = MagicMock()
+
+	def fake_get(url, **kwargs):
+		captured["url"] = url
+		return resp
+
+	with patch.object(firms.requests, "get", side_effect=fake_get):
+		firms.fetch_fires_nearby(0.0, 0.0, "fakekey")
+	assert captured["url"].endswith("/2")

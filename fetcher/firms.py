@@ -36,9 +36,18 @@ class FirmsError(Exception):
 
 
 # FIRMS Area CSV endpoint. Path params: MAP_KEY / SOURCE / west,south,east,north /
-# DAY_RANGE. DAY_RANGE=1 = most recent 24 h = "burning now".
+# DAY_RANGE.
 FIRMS_AREA_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
 HTTP_TIMEOUT = 30
+# DAY_RANGE=2 (most recent ~48 h), NOT 1: VIIRS overpasses are ~twice daily and
+# FIRMS bins detections by UTC acquisition date, so a 1-day window silently misses
+# a currently-burning fire whose last detection landed on the PRIOR UTC day — which
+# is most of the night, right after the UTC date rolls. Empirically (2026-06-25,
+# ~23:30 PDT): a fire 54 km from UDRO, detected earlier that UTC day, was INVISIBLE
+# at DAY_RANGE=1 and clearly present at 2. A fire active in the last 48 h is exactly
+# the "smoke could be over me tonight" signal; the capped penalty + "verify with
+# allsky" advisory absorb the small staleness risk.
+FIRMS_DAY_RANGE = 2
 # Power-of-Ten rule 2/3: bound the parse. A 150 km box during a megafire could in
 # principle return many rows; cap so a pathological response can't grow unbounded.
 MAX_ROWS = 20000
@@ -151,7 +160,8 @@ def fetch_fires_nearby(
 	if not map_key:
 		return None
 	w, s, e, n = _bounding_box(lat, lon, radius_km)
-	url = f"{FIRMS_AREA_URL}/{map_key}/{source}/{w:.4f},{s:.4f},{e:.4f},{n:.4f}/1"
+	url = (f"{FIRMS_AREA_URL}/{map_key}/{source}/"
+	       f"{w:.4f},{s:.4f},{e:.4f},{n:.4f}/{FIRMS_DAY_RANGE}")
 	try:
 		r = requests.get(url, timeout=HTTP_TIMEOUT)
 		r.raise_for_status()

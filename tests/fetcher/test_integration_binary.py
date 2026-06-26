@@ -18,6 +18,7 @@ stays green on a fresh checkout. Build it with:
 import contextlib
 import json
 import os
+import subprocess
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -303,3 +304,28 @@ def test_firms_failure_flags_degraded_through_main(tmp_path):
 	degraded = state["sites"][0]["meta"].get("degraded", [])
 	assert any(d.get("source") == "firms" and d.get("code") == "firms_fetch_failed"
 			   for d in degraded), "FIRMS failure must flag meta.degraded"
+
+
+def test_binary_ignores_malformed_firesnearby(tmp_path):
+	"""The wrapper's shape guard (SF-7): a non-map firesNearby in the scorer JSON is
+	ignored (stderr diagnostic) and the site still scores, rather than crashing the
+	binary. Exercised at the binary level — the fetcher never emits a malformed shape,
+	so this guards the cross-language contract, not a reachable fetcher path."""
+	now = datetime.now(timezone.utc)
+	hourly = [{
+		"time": _iso(i), "cloud_cover": 5, "cloud_cover_low": 0, "cloud_cover_mid": 0,
+		"cloud_cover_high": 0, "relative_humidity_2m": 40, "temperature_2m": 12.0,
+		"dewpoint_2m": 2.0, "wind_speed_10m": 5, "wind_gusts_10m": 8,
+		"precipitation_probability": 0, "precipitation": 0, "visibility": 50000,
+		"wind_speed_250hPa": 20,
+	} for i in range(_N)]
+	payload = {
+		"now_utc": now.isoformat().replace("+00:00", "Z"),
+		"sites": [{"id": "s", "label": "S", "lat": 45.0, "lon": -120.0,
+				   "hourly": hourly, "firesNearby": ["not", "a", "map"]}],
+	}
+	out = subprocess.run(
+		[str(fx.SCORING_BINARY)], input=json.dumps(payload).encode(),
+		stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
+	result = json.loads(out.stdout)
+	assert result["sites"][0]["status"] == "ok", "malformed firesNearby must not crash"

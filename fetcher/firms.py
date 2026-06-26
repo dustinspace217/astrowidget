@@ -114,7 +114,10 @@ def _parse_detections(csv_text: str) -> list[dict[str, Any]]:
 	Bounded at MAX_ROWS, which is logged when hit (silent truncation could
 	under-report the nearest/most-intense fire during a megafire).
 	"""
-	reader = csv.DictReader(io.StringIO(csv_text))
+	# Strip a leading UTF-8 BOM if present: csv.DictReader does NOT strip it, so a BOM
+	# would make the first column "\ufeff" + "latitude" and false-reject a genuine
+	# FIRMS response as degraded. FIRMS emits no BOM today (e2e-confirmed) — insurance.
+	reader = csv.DictReader(io.StringIO(csv_text.lstrip("\ufeff")))
 	fields = set(reader.fieldnames or [])
 	if not _REQUIRED_COLUMNS.issubset(fields):
 		raise FirmsError(

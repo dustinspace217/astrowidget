@@ -132,4 +132,16 @@ void main() {
 				'possible smoke; verify with allsky.'),
 		);
 	});
+
+	test('radius-edge fire: advisory fires even when the penalty rounds to 0', () {
+		// nearest 149 of 150 → proximity 0.0067; FRP 50 → intensity 0.5; penalty =
+		// round(25 * 0.0067 * 0.5) = 0. The advisory must STILL fire — it gates on
+		// detection (count>0), not penalty>0 (SF-6/CR-7) — and transparency is
+		// undocked (~100). A regression to the old `firePenalty>0` gate fails this.
+		final fires = FiresNearby.fromJson(
+			{'count': 1, 'nearestKm': 149.0, 'maxFrp': 50.0, 'radiusKm': 150});
+		final loc = _score(aq: _clearAq(), fires: fires);
+		expect(loc.factorScores['transparency'], greaterThanOrEqualTo(99));
+		expect(loc.reasons.any((r) => r.contains('active fire')), isTrue);
+	});
 }

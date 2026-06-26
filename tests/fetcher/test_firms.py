@@ -138,6 +138,13 @@ def test_parse_detections_rejects_non_fire_csv():
 		firms._parse_detections("Invalid MAP_KEY. Please try again.\n")
 
 
+def test_parse_detections_strips_leading_bom():
+	"""A UTF-8 BOM before the header must NOT false-reject a genuine fire-CSV body
+	(csv.DictReader does not strip the BOM; we do)."""
+	dets = firms._parse_detections("﻿latitude,longitude,frp\n0.1,0.1,12.0\n")
+	assert len(dets) == 1
+
+
 def test_fetch_fires_nearby_non_csv_200_raises_not_none():
 	"""The false-all-clear guard end-to-end: HTTP 200 with a non-CSV body raises
 	FirmsError (→ caller flags degraded), it does NOT return None ('no fires')."""

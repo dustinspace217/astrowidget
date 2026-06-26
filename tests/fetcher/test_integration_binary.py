@@ -15,6 +15,7 @@ stays green on a fresh checkout. Build it with:
     && cp /tmp/b/bundle/bin/score_location ../bin/astrowidget-score
 """
 
+import contextlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -199,3 +200,106 @@ def test_real_binary_pipeline_surfaces_astrospheric_and_tags(tmp_path):
 	plus2 = nights[2]
 	assert plus2["dark_window"] is not None
 	assert plus2["displayFactors"] is not None, "+2 night must be enriched, not truncated"
+
+
+# ── FIRMS fire-proximity through the REAL binary (smoke feature) ──────────────
+
+
+def _clear_om(lat, lon):
+	"""A near-clear sky so the cloud gate is NOT the binding constraint, letting the
+	transparency dock drive the narrowband score (so the NB-inheritance is visible)."""
+	h = {"time": [_iso(i) for i in range(_N)]}
+	for k, v in {
+		"cloud_cover": 2, "cloud_cover_low": 0, "cloud_cover_mid": 0,
+		"cloud_cover_high": 2, "relative_humidity_2m": 40, "temperature_2m": 15.0,
+		"dewpoint_2m": 0.0, "wind_speed_10m": 6, "wind_gusts_10m": 10,
+		"precipitation_probability": 0, "precipitation": 0, "visibility": 50000,
+	}.items():
+		h[k] = [v] * _N
+	return {"hourly": h}
+
+
+def _clear_aq(lat, lon):
+	"""Clear AOD (0.05) so a transparency factor exists for the fire penalty to dock."""
+	return {
+		"time": [_iso(i) for i in range(_N)],
+		"aerosol_optical_depth": [0.05] * _N,
+		"us_aqi": [40] * _N, "pm2_5": [5.0] * _N,
+	}
+
+
+def _clear_astrospheric(key, lat, lon):
+	"""Astrospheric fixture with near-clear cloud. The SCORING cloud comes from the
+	Astrospheric RDPS_CloudCover (via the ensemble), not Open-Meteo's cloud_cover, so
+	to keep the cloud gate from capping BOTH bands we must clear it here too."""
+	base = _fake_astrospheric(key, lat, lon)
+	base["RDPS_CloudCover"] = [
+		{"Value": {"ActualValue": 2.0, "ValueColor": "#000000"}, "HourOffset": i}
+		for i in range(_N)
+	]
+	return base
+
+
+def _run_main_with_firms(tmp_path, cfg, firms_fn, om_fn=_fake_open_meteo,
+						 aq_fn=None, astro_fn=_fake_astrospheric):
+	"""Runs the full pipeline (REAL binary) with firms.fetch_fires_nearby patched to
+	firms_fn (and optional om/air-quality/astrospheric fns), returning tonight's night."""
+	patches = [
+		patch.object(fx, "load_config", return_value=cfg),
+		patch.object(fx, "fetch_open_meteo", om_fn),
+		patch.object(fx, "fetch_astrospheric", astro_fn),
+		patch.object(fx, "fetch_open_meteo_convergence", lambda *a, **k: {}),
+		patch.object(fx.firms, "fetch_fires_nearby", firms_fn),
+		patch.object(fx, "CACHE_DIR", tmp_path),
+		patch.object(fx, "STATE_PATH", tmp_path / "state.json"),
+		patch.object(fx, "PREV_STATE_PATH", tmp_path / "state.prev.json"),
+		patch.object(fx, "_notify", lambda *a, **k: None),
+	]
+	if aq_fn is not None:
+		patches.append(patch.object(fx, "fetch_open_meteo_air_quality", aq_fn))
+	with contextlib.ExitStack() as stack:
+		for p in patches:
+			stack.enter_context(p)
+		fx.main()
+	return json.loads((tmp_path / "state.json").read_text())["sites"][0]["nights"][0]
+
+
+def test_firms_fire_docks_both_bands_and_advises(tmp_path):
+	"""The central integration claim, through the REAL binary: a nearby fire docks
+	BOTH broadband and narrowband (NB inherits the docked transparency), the ⚠
+	advisory reaches the reasons list, and the per-night smoke block carries
+	firesNearby with main()'s stamped asOf."""
+	cfg = _cfg()
+	cfg["api"]["firms_map_key"] = "fakekey"
+	fire = {"count": 5, "nearestKm": 10.0, "maxFrp": 200.0,
+			"radiusKm": 150, "source": "VIIRS_NOAA20_NRT"}
+	no_fire = _run_main_with_firms(
+		tmp_path, cfg, lambda *a, **k: None, _clear_om, _clear_aq,
+		astro_fn=_clear_astrospheric)
+	with_fire = _run_main_with_firms(
+		tmp_path, cfg, lambda *a, **k: dict(fire), _clear_om, _clear_aq,
+		astro_fn=_clear_astrospheric)
+
+	sn = with_fire["smoke"]["firesNearby"]
+	assert sn["count"] == 5 and sn["asOf"], "smoke block + main()-stamped asOf"
+	assert any("active fire" in r for r in with_fire["reasons"]), "advisory in reasons"
+	assert (with_fire["broadband"]["factors"]["transparency"]
+			< no_fire["broadband"]["factors"]["transparency"]), "broadband docked"
+	assert with_fire["narrowband"]["score"] < no_fire["narrowband"]["score"], \
+		"narrowband inherits the dock"
+
+
+def test_firms_failure_flags_degraded_through_main(tmp_path):
+	"""A genuine FIRMS failure (FirmsError) surfaces a meta.degraded firms entry —
+	the user-visible 'fire check failed' notice — and never aborts the run."""
+	cfg = _cfg()
+	cfg["api"]["firms_map_key"] = "fakekey"
+
+	def boom(*a, **k):
+		raise fx.firms.FirmsError("scrubbed")
+
+	_run_main_with_firms(tmp_path, cfg, boom)
+	state = json.loads((tmp_path / "state.json").read_text())
+	degraded = state["sites"][0]["meta"].get("degraded", [])
+	assert any(d.get("source") == "firms" and d.get("code") == "firms_fetch_failed"
+			   for d in degraded), "FIRMS failure must flag meta.degraded"

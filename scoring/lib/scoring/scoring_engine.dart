@@ -1286,16 +1286,18 @@ LocationScore scoreLocation({
 	// OMIT it from the map in that case (never write 0 — absence ≠ worst haze).
 	int? transparencyFactor =
 		_smokeScore(forecast.airQuality, windowStart, windowEnd);
-	// Fire-proximity penalty (spec §9): dock transparency when active fires are
-	// nearby — the signal the coarse aerosol model misses. Seed from 100 when there
-	// is no AOD factor so a nearby fire still creates a dock (a fire with no modeled
-	// aerosol is exactly the under-forecast case). No fire → transparencyFactor is
-	// untouched (stays null without AOD, so a quiet night's factor set is unchanged,
-	// and the NB wrapper's present-factors-only composite is unaffected).
+	// Fire-proximity penalty (spec §9, REVISED 2026-06-26 QA). Dock the transparency
+	// factor ONLY when AOD data exists (reduce the real measured factor; the NB
+	// wrapper inherits the docked value). We deliberately do NOT fabricate a
+	// transparency factor on the no-AOD path: seeding 100−penalty inserts a HIGH new
+	// factor at weight 0.9 that can paradoxically RAISE the weighted-mean composite
+	// when the other factors are mediocre — a fire lifting the score is the opposite
+	// of the intent (CR-1). On the no-AOD path the fire still surfaces via the
+	// advisory below; we simply have no transparency measurement to dock, consistent
+	// with the omit-not-zero rule.
 	final firePenalty = _fireProximityPenalty(firesNearby);
-	if (firePenalty > 0) {
-		final base = transparencyFactor ?? 100;
-		transparencyFactor = (base - firePenalty).clamp(0, 100);
+	if (firePenalty > 0 && transparencyFactor != null) {
+		transparencyFactor = (transparencyFactor - firePenalty).clamp(0, 100);
 	}
 
 	// ── Composite: null-aware weighted mean over the PRESENT factors (fix 2) ──
@@ -1354,10 +1356,15 @@ LocationScore scoreLocation({
 		reasons.add('Mostly cloudy — limited imaging opportunities.');
 	}
 
-	// Fire advisory (spec §9/§10): surface nearby active fires even when the score
-	// still reads green, so the user cross-checks against their allsky. Guarded by
-	// firePenalty>0, which implies count>0 and a non-null nearestKm.
-	if (firePenalty > 0 && firesNearby != null) {
+	// Fire advisory (spec §9/§10): surface ANY detected fire even when the score
+	// reads green AND when the penalty rounds to 0 (a distant/small fire at the
+	// radius edge) or there was no AOD to dock — gate on the DETECTION (count > 0),
+	// NOT on firePenalty, so the advisory never disappears while the UIs still show
+	// the fire (QA 2026-06-26, SF-6/CR-7). nearestKm is non-null whenever count > 0
+	// (the fetcher's _aggregate sets it together with count).
+	if (firesNearby != null &&
+		firesNearby.count > 0 &&
+		firesNearby.nearestKm != null) {
 		reasons.add(
 			'⚠ ${firesNearby.count} active fire(s) within ${firesNearby.radiusKm} km '
 			'(nearest ${firesNearby.nearestKm!.round()} km) — possible smoke; '

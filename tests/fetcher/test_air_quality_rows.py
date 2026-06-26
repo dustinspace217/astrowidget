@@ -47,3 +47,17 @@ def test_build_air_quality_rows_short_aqi_column_defaults_tail_to_none():
 	assert rows[0]["us_aqi"] == 40
 	assert rows[1]["us_aqi"] is None
 	assert rows[1]["pm2_5"] == 4.0
+
+
+def test_build_air_quality_rows_scrubs_nonfinite_aqi_pm25():
+	"""A non-finite us_aqi/pm2_5 → None (mirrors the AOD scrub) so a stray NaN can't
+	crash round()/json.dumps downstream or poison the smoke block."""
+	hourly = {
+		"time": ["t0"],
+		"aerosol_optical_depth": [0.05],
+		"us_aqi": [float("nan")],
+		"pm2_5": [float("inf")],
+	}
+	rows = fx.build_air_quality_rows(hourly)
+	assert rows[0]["us_aqi"] is None
+	assert rows[0]["pm2_5"] is None

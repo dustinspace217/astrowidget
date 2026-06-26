@@ -10,28 +10,39 @@ WHY a separate module: pure data acquisition + geometry, with no scoring and no
 astrowidget_fetch coupling, so it is independently testable with synthetic CSV
 (public-repo discipline: never a real coordinate in a test).
 
-ERROR MODEL: a genuine fetch/HTTP failure raises FirmsError (so the caller can
-flag meta.degraded); a clean "no fires nearby" returns None. The two are never
-conflated into one ambiguous None. The caller (astrowidget_fetch.main) wraps the
-call so the fetch run never aborts on a fire-data problem.
+ERROR MODEL (decide "failure vs. no-fires" by CONTENT, not just HTTP status): a
+genuine failure — network/HTTP error, a 200-OK body that is NOT fire-CSV (FIRMS
+returns 200 + plain text for an invalid/expired MAP_KEY and for rate-limit
+notices), or an unparseable body — raises FirmsError so the caller flags
+meta.degraded. ONLY a real, validated, fire-CSV response with no detections in
+range returns None. The two states are never conflated: a false "all clear" is
+the worst outcome for a smoke-WARNING feature (QA 2026-06-26).
+
+SECRET HYGIENE: the MAP_KEY goes in the URL PATH, so a requests exception string
+(which includes the URL) would leak it to stderr/the journal. We therefore never
+put the original exception text (or the URL) in a FirmsError — only the exception
+TYPE — and break the cause chain with `from None`. Mirrors fetch_astrospheric.
 
 Dependencies: requests (already the fetcher's only external dep) + stdlib.
 """
 import csv
 import io
 import math
+import sys
+import urllib.parse
 from typing import Any
 
 import requests
 
 
 class FirmsError(Exception):
-	"""A FIRMS fetch/parse GENUINELY failed (network, HTTP, unparseable body).
+	"""A FIRMS fetch/parse GENUINELY failed (network, HTTP, non-CSV/unparseable body).
 
-	Distinct from a clean "no fires nearby," which returns None. The caller
-	catches FirmsError to flag meta.degraded, while a None result is a normal
-	quiet-sky night that flags nothing — the two states must never collapse into
-	one ambiguous None.
+	Distinct from a clean "no fires nearby," which returns None. The caller catches
+	FirmsError to flag meta.degraded, while a None result is a normal quiet-sky night
+	that flags nothing — the two states must never collapse into one ambiguous None.
+	NEVER carries the request URL or original exception text (the URL holds the map
+	key); only an exception-type name, so it is safe to write to stderr/the journal.
 	"""
 
 
@@ -52,7 +63,13 @@ FIRMS_DAY_RANGE = 2
 # principle return many rows; cap so a pathological response can't grow unbounded.
 MAX_ROWS = 20000
 # VIIRS confidence is l/n/h (low/nominal/high). Drop low-confidence detections.
+# NOTE: this assumes the VIIRS letter-code scale (the default source). A MODIS feed
+# reports numeric 0-100 confidence; if `source` is ever overridden to MODIS this
+# filter would need a numeric branch (tracked for v2 with the source config).
 _DROP_CONFIDENCE = {"l", "low"}
+# Columns every FIRMS fire-CSV row carries. Used to validate that a 200-OK body is
+# actually fire data before an empty parse is trusted as "no fires" (see ERROR MODEL).
+_REQUIRED_COLUMNS = {"latitude", "longitude"}
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -77,7 +94,8 @@ def _bounding_box(
 	The FIRMS Area API takes a bounding box, so we request the inscribing square
 	then filter detections to the true circle in _aggregate. dLon widens with
 	latitude (meridians converge) via /cos(lat). Returned ORDER is west,south,
-	east,north — exactly the order the FIRMS path expects.
+	east,north — exactly the order the FIRMS path expects. (No antimeridian/pole
+	normalization: no real astro site is within ~1.5° of ±180° lon or ±88° lat.)
 	"""
 	d_lat = radius_km / 111.0
 	# Guard the pole singularity (cos→0). cos(89°)≈0.017; clamp keeps the box finite.
@@ -88,14 +106,27 @@ def _bounding_box(
 def _parse_detections(csv_text: str) -> list[dict[str, Any]]:
 	"""Parse FIRMS CSV text into [{'latitude','longitude','frp'}] detections.
 
-	Keeps only rows with a parseable lat/lon/frp and confidence not in the
-	low-confidence set. Malformed rows are skipped (best-effort). Bounded at
-	MAX_ROWS so a runaway response can't grow unbounded.
+	Raises FirmsError when the body is not FIRMS fire-CSV — the header lacks the
+	required columns (an invalid-key/rate-limit/error page served as HTTP 200), so
+	an empty parse is NOT silently trusted as "no fires" (the false-all-clear this
+	feature exists to prevent). Otherwise keeps rows with a parseable lat/lon/frp
+	and confidence not in the low set; malformed rows are skipped (best-effort).
+	Bounded at MAX_ROWS, which is logged when hit (silent truncation could
+	under-report the nearest/most-intense fire during a megafire).
 	"""
-	out: list[dict[str, Any]] = []
 	reader = csv.DictReader(io.StringIO(csv_text))
+	fields = set(reader.fieldnames or [])
+	if not _REQUIRED_COLUMNS.issubset(fields):
+		raise FirmsError(
+			"FIRMS response is not fire-CSV (missing lat/lon header columns)"
+		)
+	out: list[dict[str, Any]] = []
 	for i, row in enumerate(reader):
 		if i >= MAX_ROWS:
+			sys.stderr.write(
+				f"astrowidget: FIRMS row cap ({MAX_ROWS}) hit — nearest/peak fire "
+				"may be under-reported this run\n"
+			)
 			break
 		conf = str(row.get("confidence", "")).strip().lower()
 		if conf in _DROP_CONFIDENCE:
@@ -152,24 +183,39 @@ def fetch_fires_nearby(
 	Receives: site lat/lon (decimal degrees), a FIRMS map_key (free), the search
 	    radius_km, and the FIRMS source feed.
 	Returns: {'count','nearestKm','maxFrp','radiusKm','source'} when fires are
-	    within radius, else None (no key, or no fires nearby). `asOf` is stamped by
-	    the caller from now_utc so this stays wall-clock-free for tests.
-	Raises: FirmsError on a genuine fetch/HTTP failure (None is reserved for the
-	    clean no-fires case so the caller can tell the two apart).
+	    within radius, else None (no key, or a VALIDATED no-fires response). `asOf`
+	    is stamped by the caller from now_utc so this stays wall-clock-free for tests.
+	Raises: FirmsError on ANY genuine failure — network/HTTP, a non-CSV 200 body, or
+	    an unparseable body — so the caller flags meta.degraded. None is reserved for
+	    a validated no-fires response; the two are never conflated. The raised message
+	    never contains the URL or original exception text (it holds the map key).
 	"""
 	if not map_key:
 		return None
 	w, s, e, n = _bounding_box(lat, lon, radius_km)
-	url = (f"{FIRMS_AREA_URL}/{map_key}/{source}/"
+	# URL-encode the key so a stray character can't malform the path; safe="" so '/'
+	# is escaped too. The key is still a secret in the URL — see SECRET HYGIENE.
+	safe_key = urllib.parse.quote(map_key, safe="")
+	url = (f"{FIRMS_AREA_URL}/{safe_key}/{source}/"
 	       f"{w:.4f},{s:.4f},{e:.4f},{n:.4f}/{FIRMS_DAY_RANGE}")
 	try:
-		r = requests.get(url, timeout=HTTP_TIMEOUT)
+		# allow_redirects=False: the host is a fixed HTTPS constant; a redirect would
+		# only re-send the key-bearing request elsewhere, so refuse it.
+		r = requests.get(url, timeout=HTTP_TIMEOUT, allow_redirects=False)
 		r.raise_for_status()
+		# _parse_detections validates the body is fire-CSV and may raise FirmsError;
+		# it runs INSIDE the try so a csv.Error (NUL byte / oversized field) cannot
+		# escape as a raw exception and abort the whole fetch run (best-effort, §7).
+		detections = _parse_detections(r.text)
+	except FirmsError:
+		raise  # already scrubbed + intentional; don't double-wrap
 	except requests.RequestException as exc:
-		# Genuine failure — surface it so the caller flags degraded. The run still
-		# continues (the caller catches FirmsError); None stays reserved for no-fires.
-		raise FirmsError(str(exc)) from exc
-	detections = _parse_detections(r.text)
+		# Scrub: the exception string contains the key-bearing URL — never log it.
+		raise FirmsError(f"FIRMS request failed ({type(exc).__name__})") from None
+	except (csv.Error, ValueError) as exc:
+		raise FirmsError(
+			f"FIRMS response unparseable ({type(exc).__name__})"
+		) from None
 	agg = _aggregate(detections, lat, lon, radius_km)
 	if agg is None:
 		return None

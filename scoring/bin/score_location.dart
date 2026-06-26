@@ -308,6 +308,13 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 	// Optional FIRMS active-fire snapshot (astrowidget-specific). Absent / non-map
 	// → null → no penalty (the engine treats null as "no fire data").
 	final firesRaw = site['firesNearby'];
+	if (firesRaw != null && firesRaw is! Map<String, dynamic>) {
+		// A present-but-malformed snapshot (array/string/number) silently disabling
+		// the fire penalty would hide a fetcher↔scorer contract break, so make it
+		// visible on stderr (→ journal) rather than swallowing it.
+		stderr.writeln('score_location: firesNearby has unexpected shape '
+			'(${firesRaw.runtimeType}); ignoring');
+	}
 	final firesNearby = firesRaw is Map<String, dynamic>
 		? FiresNearby.fromJson(firesRaw)
 		: null;

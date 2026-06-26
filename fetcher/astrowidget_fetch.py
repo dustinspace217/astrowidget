@@ -741,20 +741,21 @@ def build_air_quality_rows(aq_hourly: dict[str, list[Any]]) -> list[dict[str, An
 	pm25 = aq_hourly.get("pm2_5")
 	aqi = aqi if isinstance(aqi, list) else []
 	pm25 = pm25 if isinstance(pm25, list) else []
+	# Coerce any non-finite (NaN/inf) reading to None — for AOD AND the new
+	# us_aqi/pm2_5. A null reads as "station doesn't report it" (omitted, not zeroed);
+	# an un-scrubbed NaN would crash round()/json.dumps downstream and poison the smoke
+	# block (QA 2026-06-26 — the AOD scrub previously was not carried to AQI/PM2.5).
+	def _finite_or_none(x: Any) -> Any:
+		return None if isinstance(x, float) and not math.isfinite(x) else x
+
 	n = min(len(times), len(aod))
 	rows: list[dict[str, Any]] = []
 	for i in range(n):
-		v = aod[i]
-		# Coerce a non-finite AOD to None: AirQuality.fromJson reads a null
-		# aerosol_optical_depth as "station doesn't report it", which the engine
-		# treats as no-smoke-data — preferable to a confident NaN-derived reading.
-		if isinstance(v, float) and not math.isfinite(v):
-			v = None
 		rows.append({
 			"time": times[i],
-			"aerosol_optical_depth": v,
-			"us_aqi": aqi[i] if i < len(aqi) else None,
-			"pm2_5": pm25[i] if i < len(pm25) else None,
+			"aerosol_optical_depth": _finite_or_none(aod[i]),
+			"us_aqi": _finite_or_none(aqi[i]) if i < len(aqi) else None,
+			"pm2_5": _finite_or_none(pm25[i]) if i < len(pm25) else None,
 		})
 	return rows
 

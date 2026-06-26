@@ -3,6 +3,7 @@
 Synthetic coordinates only (public-repo discipline). Network is mocked; there are
 no live FIRMS calls in the suite.
 """
+import csv
 import math
 from unittest.mock import MagicMock, patch
 
@@ -10,6 +11,14 @@ import pytest
 import requests
 
 import firms
+
+
+def _ok_resp(text):
+	"""A MagicMock that quacks like a 200-OK requests.Response with `text`."""
+	resp = MagicMock()
+	resp.text = text
+	resp.raise_for_status = MagicMock()
+	return resp
 
 
 # ── Pure helpers (no network) ────────────────────────────────────────────────
@@ -117,3 +126,48 @@ def test_fetch_fires_nearby_uses_day_range_2():
 	with patch.object(firms.requests, "get", side_effect=fake_get):
 		firms.fetch_fires_nearby(0.0, 0.0, "fakekey")
 	assert captured["url"].endswith("/2")
+
+
+# ── Content-validation: a 200-OK non-CSV body must NOT read as "no fires" ─────
+
+
+def test_parse_detections_rejects_non_fire_csv():
+	"""A body without the lat/lon header columns (e.g. an invalid-key/rate-limit
+	plain-text notice served as 200) raises FirmsError — never a silent empty parse."""
+	with pytest.raises(firms.FirmsError):
+		firms._parse_detections("Invalid MAP_KEY. Please try again.\n")
+
+
+def test_fetch_fires_nearby_non_csv_200_raises_not_none():
+	"""The false-all-clear guard end-to-end: HTTP 200 with a non-CSV body raises
+	FirmsError (→ caller flags degraded), it does NOT return None ('no fires')."""
+	with patch.object(firms.requests, "get",
+					  return_value=_ok_resp("Invalid MAP_KEY.\n")):
+		with pytest.raises(firms.FirmsError):
+			firms.fetch_fires_nearby(0.0, 0.0, "fakekey")
+
+
+def test_fetch_fires_nearby_error_does_not_leak_key():
+	"""The map key lives in the URL path, so a requests exception string contains
+	it. The raised FirmsError must NOT echo the key (it would reach stderr/journal)."""
+	secret = "deadbeefdeadbeefdeadbeefdeadbeef"
+	exc = requests.ConnectionError(
+		f"Max retries exceeded with url: /api/area/csv/{secret}/VIIRS/0,0,1,1/2")
+	with patch.object(firms.requests, "get", side_effect=exc):
+		with pytest.raises(firms.FirmsError) as ei:
+			firms.fetch_fires_nearby(0.0, 0.0, secret)
+	assert secret not in str(ei.value)
+
+
+def test_fetch_fires_nearby_contains_csv_error(monkeypatch):
+	"""A csv.Error from the parse stage (NUL byte / oversized field) is wrapped as
+	FirmsError rather than escaping raw and aborting the whole fetch run."""
+	monkeypatch.setattr(firms.requests, "get",
+						lambda *a, **k: _ok_resp("latitude,longitude\n"))
+
+	def boom(_text):
+		raise csv.Error("line contains NUL")
+
+	monkeypatch.setattr(firms, "_parse_detections", boom)
+	with pytest.raises(firms.FirmsError):
+		firms.fetch_fires_nearby(0.0, 0.0, "fakekey")

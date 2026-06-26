@@ -63,12 +63,38 @@ void main() {
 		expect(loc.factorScores['transparency'], greaterThanOrEqualTo(70));
 	});
 
-	test('fire seeds a transparency factor even with no AOD data', () {
+	test('no AOD + fire: NO transparency factor fabricated (anti-inversion), '
+		'advisory still fires', () {
+		// CR-1: seeding a high transparency factor on the no-AOD path could RAISE the
+		// composite (inserting a high-value weight-0.9 factor lifts a mean of mediocre
+		// factors). So we omit transparency entirely and rely on the advisory.
 		final fires = FiresNearby.fromJson(
 			{'count': 2, 'nearestKm': 30.0, 'maxFrp': 150.0, 'radiusKm': 150});
 		final loc = _score(aq: null, fires: fires);
-		expect(loc.factorScores.containsKey('transparency'), isTrue);
-		expect(loc.factorScores['transparency'], lessThan(100));
+		expect(loc.factorScores.containsKey('transparency'), isFalse);
+		expect(loc.reasons.any((r) => r.contains('active fire')), isTrue);
+	});
+
+	test('no AOD + fire never raises the composite vs no-fire (anti-inversion, '
+		'mediocre factors)', () {
+		// The exact CR-1 trigger: no AOD, fire nearby, other factors not great. The
+		// with-fire composite must be <= the no-fire composite, never higher.
+		final fires = FiresNearby.fromJson(
+			{'count': 3, 'nearestKm': 20.0, 'maxFrp': 200.0, 'radiusKm': 150});
+		final noFire = scoreLocation(
+			forecast: WeatherForecast(
+				locationId: 0, fetchedAt: _start, hours: _hrs(), airQuality: null),
+			darkWindow: DarkWindow(start: _start, end: _end),
+			moonIlluminationPercent: 95, moonAltitude: 80, // bright moon → low skyBrightness
+		);
+		final withFire = scoreLocation(
+			forecast: WeatherForecast(
+				locationId: 0, fetchedAt: _start, hours: _hrs(), airQuality: null),
+			darkWindow: DarkWindow(start: _start, end: _end),
+			moonIlluminationPercent: 95, moonAltitude: 80,
+			firesNearby: fires,
+		);
+		expect(withFire.score, lessThanOrEqualTo(noFire.score));
 	});
 
 	test('distant small fire docks little', () {
@@ -76,5 +102,34 @@ void main() {
 			{'count': 1, 'nearestKm': 140.0, 'maxFrp': 20.0, 'radiusKm': 150});
 		final loc = _score(aq: _clearAq(), fires: fires);
 		expect(loc.factorScores['transparency'], greaterThanOrEqualTo(98));
+	});
+
+	test('intensity floor is load-bearing: a close TINY-FRP fire still docks ~7', () {
+		// proximity = 1 - 15/150 = 0.9; FRP 5 → intensity FLOORED at 0.3 (not 0.05) →
+		// penalty = round(25 * 0.9 * 0.3) = 7 → transparency 93. Remove the floor and
+		// intensity 0.05 gives penalty 1 → transparency 99, outside this band.
+		final fires = FiresNearby.fromJson(
+			{'count': 1, 'nearestKm': 15.0, 'maxFrp': 5.0, 'radiusKm': 150});
+		final loc = _score(aq: _clearAq(), fires: fires);
+		expect(loc.factorScores['transparency'], inInclusiveRange(90, 95));
+	});
+
+	test('penalty cap is exactly 25 (transparency 100 → 75 at the boundary)', () {
+		// nearest 0 → proximity 1; FRP 100 → intensity 1 → penalty = 25 exactly.
+		final fires = FiresNearby.fromJson(
+			{'count': 1, 'nearestKm': 0.0, 'maxFrp': 100.0, 'radiusKm': 150});
+		final loc = _score(aq: _clearAq(), fires: fires);
+		expect(loc.factorScores['transparency'], 75);
+	});
+
+	test('advisory string is exact', () {
+		final fires = FiresNearby.fromJson(
+			{'count': 3, 'nearestKm': 15.0, 'maxFrp': 200.0, 'radiusKm': 150});
+		final loc = _score(aq: _clearAq(), fires: fires);
+		expect(
+			loc.reasons,
+			contains('⚠ 3 active fire(s) within 150 km (nearest 15 km) — '
+				'possible smoke; verify with allsky.'),
+		);
 	});
 }

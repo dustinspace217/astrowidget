@@ -43,6 +43,7 @@ from typing import Any
 import requests
 
 import calibration_log  # local module: the Phase-3 calibration database
+import firms  # local module: NASA FIRMS active-fire proximity (smoke feature)
 
 # Matches a trailing ISO-8601 timezone offset like "+00:00", "-0800", "+05:30".
 # Used to detect whether a timestamp already carries an offset before we
@@ -1891,6 +1892,44 @@ def slice_hourly_for_night(
 	return out
 
 
+def enrich_night_smoke(
+	night: dict[str, Any],
+	air_quality_rows: list[dict[str, Any]],
+	fires_nearby: dict[str, Any] | None,
+) -> None:
+	"""Attach the per-night `smoke` block — the smoke feature's surfacing layer.
+
+	WHAT: computes window-mean + peak AOD and a representative AQI/PM2.5 over the
+	night's dark window from air_quality_rows, and pairs them with the site-level
+	fires_nearby snapshot. Mutates `night` in place (parallels enrich_night_factors).
+
+	WHY mean AND peak AOD: the mean drives the felt transparency, but a smoke spike
+	(the 0.16 sunset value at UDRO on 2026-06-25) is worth surfacing separately so
+	the user sees the worst the model expects. AQI/PM2.5 use the window mean — a
+	representative number for the human cross-check; they are NOT scored (column AOD
+	is the physical transparency proxy, surface particulates can diverge from it).
+
+	Receives: night (mutated); air_quality_rows (per-hour AOD/AQI/PM2.5 for the
+	    site); fires_nearby (the site's FIRMS snapshot, or None).
+	Null-safe: every field defaults to None when its source is absent (null ≠ 0).
+	Reuses slice_hourly_for_night — air_quality_rows share the hourly "time" shape.
+	"""
+	window_rows = slice_hourly_for_night(air_quality_rows, night.get("dark_window"))
+	aods = [r["aerosol_optical_depth"] for r in window_rows
+	        if isinstance(r.get("aerosol_optical_depth"), (int, float))]
+	aqis = [r["us_aqi"] for r in window_rows
+	        if isinstance(r.get("us_aqi"), (int, float))]
+	pms = [r["pm2_5"] for r in window_rows
+	       if isinstance(r.get("pm2_5"), (int, float))]
+	night["smoke"] = {
+		"aodMean": round(sum(aods) / len(aods), 3) if aods else None,
+		"aodPeak": round(max(aods), 3) if aods else None,
+		"usAqi": round(sum(aqis) / len(aqis)) if aqis else None,
+		"pm25": round(sum(pms) / len(pms), 1) if pms else None,
+		"firesNearby": fires_nearby,
+	}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Pipeline
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1933,6 +1972,10 @@ def main() -> int:
 	api_key = cfg.get("api", {}).get("astrospheric_key", "")
 	sites_cfg = cfg["sites"]
 	credit_budget = int(cfg.get("api", {}).get("astrospheric_daily_credit_budget", 100))
+	# Smoke feature: optional FIRMS active-fire detection (free key). Absent → the
+	# fire path is skipped entirely (graceful degradation). Radius default 150 km.
+	firms_key = cfg.get("api", {}).get("firms_map_key", "")
+	firms_radius_km = float(cfg.get("api", {}).get("firms_radius_km", 150.0))
 
 	now_utc = datetime.now(timezone.utc)
 	credit_cost = 0
@@ -1946,6 +1989,10 @@ def main() -> int:
 	# per-site seeing/transparency source tag so enrich can pick the label scale.
 	convergence_by_id: dict[str, dict[datetime, dict[str, float]]] = {}
 	st_source_by_id: dict[str, str] = {}
+	# Smoke feature: per-site air-quality rows (for the smoke block's per-night
+	# AOD/AQI/PM2.5) and the FIRMS active-fire snapshot, threaded to the enrich loop.
+	air_quality_by_id: dict[str, list[dict[str, Any]]] = {}
+	firms_by_id: dict[str, dict[str, Any] | None] = {}
 
 	for site_cfg in sites_cfg:
 		sid = site_cfg["id"]
@@ -1982,6 +2029,25 @@ def main() -> int:
 			air_quality_rows = build_air_quality_rows(
 				fetch_open_meteo_air_quality(lat, lon)
 			)
+
+			# FIRMS active-fire proximity (best-effort, global). A genuine fetch
+			# failure raises FirmsError → flagged as degraded below; "no fires
+			# nearby" is a clean None. The run never aborts on a fire-data problem.
+			fires_nearby = None
+			firms_failed = False
+			if firms_key:
+				try:
+					fires_nearby = firms.fetch_fires_nearby(
+						lat, lon, firms_key, firms_radius_km
+					)
+				except firms.FirmsError as fe:
+					firms_failed = True
+					sys.stderr.write(
+						f"astrowidget: {sid}: FIRMS fetch failed ({fe}) — non-fatal\n"
+					)
+			if fires_nearby is not None:
+				# Stamp asOf from now_utc (firms.py stays wall-clock-free for tests).
+				fires_nearby["asOf"] = now_utc.date().isoformat()
 
 			# Astrospheric eligibility is derived from lat/lon (no per-site flag).
 			# In-domain + key present → try the paid feed; on ANY failure, fall
@@ -2050,6 +2116,16 @@ def main() -> int:
 				if degraded:
 					meta["degraded"] = degraded
 
+			# FIRMS failure is independent of the cloud source, so attach its
+			# degraded entry to meta AFTER the Astrospheric/free branch (the free
+			# path may already have created meta["degraded"]; setdefault handles both).
+			if firms_failed:
+				meta.setdefault("degraded", []).append({
+					"source": "firms",
+					"reason": "FIRMS unavailable — fire proximity not checked",
+					"code": "firms_fetch_failed",
+				})
+
 			hourly_by_id[sid] = hourly
 			# The ensemble's per_model is the convergence-display source: for NA
 			# sites it includes Astrospheric Cloud Sense + GFS/NAM (richer than
@@ -2057,6 +2133,8 @@ def main() -> int:
 			# expects. This supersedes the old build_convergence_index call.
 			convergence_by_id[sid] = per_model
 			st_source_by_id[sid] = st_source
+			air_quality_by_id[sid] = air_quality_rows
+			firms_by_id[sid] = fires_nearby
 
 			scoring_sites.append({
 				"id": sid,
@@ -2073,6 +2151,9 @@ def main() -> int:
 				"nb_leakage": nb_leakage,
 				"managed": managed,
 				"airQuality": air_quality_rows,
+				# FIRMS active-fire snapshot (or None) — the engine docks transparency
+				# when fires are nearby (applies to BOTH bands via the NB wrapper).
+				"firesNearby": fires_nearby,
 			})
 			site_results.append({
 				"id": sid,
@@ -2135,6 +2216,13 @@ def main() -> int:
 				enrich_night_factors(
 					night, night_slice, site_convergence,
 					st_source_by_id.get(sr["id"], "astrospheric"),
+				)
+				# Smoke block: per-night AOD/AQI/PM2.5 over the dark window + the
+				# site-level FIRMS snapshot, for the UIs' independent cross-check.
+				enrich_night_smoke(
+					night,
+					air_quality_by_id.get(sr["id"], []),
+					firms_by_id.get(sr["id"]),
 				)
 			sr["nights"] = nights
 

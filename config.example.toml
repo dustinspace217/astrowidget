@@ -16,6 +16,17 @@ astrospheric_key = ""
 # Set to 0 to disable budget tracking. Only North-America sites use credits.
 astrospheric_daily_credit_budget = 100
 
+# NASA FIRMS active-fire detection (OPTIONAL, free, global). Surfaces nearby
+# wildfires the coarse aerosol model can miss, and docks the transparency score
+# when fires are close. Get a free key (enter your email, the key is emailed
+# back, no approval wait): https://firms.modaps.eosdis.nasa.gov/api/map_key/
+# Leave blank to disable — the widget then shows AOD/AQI only and the verdict is
+# unaffected by fire proximity (graceful degradation).
+firms_map_key = ""
+
+# Radius (km) around each site to search for active fires. Default 150.
+firms_radius_km = 150
+
 # Open-Meteo is free and requires no key.
 [open_meteo]
 # Open-Meteo cloud-cover models for the multi-model ensemble. For North-America

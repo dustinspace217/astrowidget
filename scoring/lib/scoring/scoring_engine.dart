@@ -569,6 +569,32 @@ int _rigScore(
 	return score;
 }
 
+// Fire-proximity penalty constants (spec §9). Physics-defaults — Dustin reviews
+// at the commit boundary. _fireMaxPenalty caps the dock so a fire alone can't
+// zero transparency; _fireIntensityRef is the FRP (MW) where intensity weight
+// saturates; _fireIntensityFloor ensures any detected fire counts for something.
+const int _fireMaxPenalty = 25;
+const double _fireIntensityRef = 100.0;
+const double _fireIntensityFloor = 0.3;
+
+/// Capped transparency penalty (0.._fireMaxPenalty) from active-fire proximity.
+///
+/// Receives: [fires] — the site's FiresNearby snapshot, or null.
+/// Returns: points to subtract from the transparency factor; 0 when no fires.
+/// penalty = MAX × proximity × intensity, where proximity = 1 at the site → 0 at
+/// the search radius, and intensity = clamp(maxFrp/REF, FLOOR, 1). Closer +
+/// bigger fires dock more; a distant small detection docks little. Pure function.
+int _fireProximityPenalty(FiresNearby? fires) {
+	if (fires == null || fires.count == 0) return 0;
+	final nearest = fires.nearestKm;
+	final radius = fires.radiusKm.toDouble();
+	if (nearest == null || radius <= 0) return 0;
+	final proximity = (1.0 - nearest / radius).clamp(0.0, 1.0);
+	final frp = fires.maxFrp ?? 0.0;
+	final intensity = (frp / _fireIntensityRef).clamp(_fireIntensityFloor, 1.0);
+	return (_fireMaxPenalty * proximity * intensity).round();
+}
+
 /// Computes the smoke/AQI factor score (0-100) from air quality data.
 ///
 /// Uses aerosol optical depth (AOD) as the primary metric — it measures
@@ -1173,6 +1199,9 @@ LocationScore scoreLocation({
 	// the engine scores uniformly. See score_location.dart.)
 	int? siteBortle,
 	double? moonAltitude,
+	// FIRMS active-fire snapshot (astrowidget delta — see VENDORED.md). Optional so
+	// existing astroplan callers still compile. A nearby fire docks transparency.
+	FiresNearby? firesNearby,
 }) {
 	final reasons = <String>[];
 
@@ -1255,8 +1284,19 @@ LocationScore scoreLocation({
 	// ── Transparency (AOD) factor — present ONLY when air-quality data exists ──
 	// _smokeScore returns null when there's no usable AOD in the window. fix 2: we
 	// OMIT it from the map in that case (never write 0 — absence ≠ worst haze).
-	final transparencyFactor =
+	int? transparencyFactor =
 		_smokeScore(forecast.airQuality, windowStart, windowEnd);
+	// Fire-proximity penalty (spec §9): dock transparency when active fires are
+	// nearby — the signal the coarse aerosol model misses. Seed from 100 when there
+	// is no AOD factor so a nearby fire still creates a dock (a fire with no modeled
+	// aerosol is exactly the under-forecast case). No fire → transparencyFactor is
+	// untouched (stays null without AOD, so a quiet night's factor set is unchanged,
+	// and the NB wrapper's present-factors-only composite is unaffected).
+	final firePenalty = _fireProximityPenalty(firesNearby);
+	if (firePenalty > 0) {
+		final base = transparencyFactor ?? 100;
+		transparencyFactor = (base - firePenalty).clamp(0, 100);
+	}
 
 	// ── Composite: null-aware weighted mean over the PRESENT factors (fix 2) ──
 	// An absent factor contributes neither score nor weight; it is never scored as
@@ -1312,6 +1352,17 @@ LocationScore scoreLocation({
 		reasons.add('Partly cloudy — some breaks expected.');
 	} else {
 		reasons.add('Mostly cloudy — limited imaging opportunities.');
+	}
+
+	// Fire advisory (spec §9/§10): surface nearby active fires even when the score
+	// still reads green, so the user cross-checks against their allsky. Guarded by
+	// firePenalty>0, which implies count>0 and a non-null nearestKm.
+	if (firePenalty > 0 && firesNearby != null) {
+		reasons.add(
+			'⚠ ${firesNearby.count} active fire(s) within ${firesNearby.radiusKm} km '
+			'(nearest ${firesNearby.nearestKm!.round()} km) — possible smoke; '
+			'verify with allsky.',
+		);
 	}
 
 	// Narrowband suggestion fires only when the moon is actually UP and bright —

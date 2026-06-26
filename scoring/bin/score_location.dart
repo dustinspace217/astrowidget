@@ -305,6 +305,12 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 		: aqRaw
 			.map((a) => AirQuality.fromJson(a as Map<String, dynamic>))
 			.toList();
+	// Optional FIRMS active-fire snapshot (astrowidget-specific). Absent / non-map
+	// → null → no penalty (the engine treats null as "no fire data").
+	final firesRaw = site['firesNearby'];
+	final firesNearby = firesRaw is Map<String, dynamic>
+		? FiresNearby.fromJson(firesRaw)
+		: null;
 	final forecast = WeatherForecast(
 		locationId: 0, // unused by scoreLocation
 		fetchedAt: nowUtc,
@@ -354,6 +360,7 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 			windMaxKmh: windMaxKmh,
 			precipMaxPct: precipMaxPct,
 			dewSpreadMinC: dewSpreadMinC,
+			firesNearby: firesNearby,
 		));
 	}
 
@@ -381,6 +388,7 @@ Map<String, dynamic> _scoreOneNight({
 	required double windMaxKmh,
 	required double precipMaxPct,
 	required double dewSpreadMinC,
+	required FiresNearby? firesNearby,
 }) {
 	// Find tonight's astronomical dark window.
 	final darkWindow = astronomicalDarkWindow(
@@ -452,6 +460,7 @@ Map<String, dynamic> _scoreOneNight({
 		moonIlluminationPercent: moonIllum,
 		siteBortle: siteBortle,
 		moonAltitude: maxMoonAlt,
+		firesNearby: firesNearby,
 	);
 
 	// Imaging-window hours (astronomical dark): used for the cloud / wind /

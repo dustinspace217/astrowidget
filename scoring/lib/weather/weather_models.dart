@@ -243,6 +243,63 @@ class AirQuality {
 	};
 }
 
+/// Active-fire proximity summary for a site (NASA FIRMS). A single site-level
+/// snapshot (NOT hourly): count of satellite-detected active fires within the
+/// configured radius, the nearest one's distance, and the peak fire radiative
+/// power. Drives the engine's fire-proximity transparency penalty — it catches
+/// near-source wildfire smoke the coarse CAMS aerosol model under-resolves
+/// (the 2026-06-25 UDRO miss). A null block means "no fire data" → no penalty;
+/// the fetcher already collapses count 0 to a null block.
+class FiresNearby {
+	/// Active fires detected within [radiusKm] of the site.
+	final int count;
+
+	/// Great-circle distance (km) to the nearest detection, or null if count 0.
+	final double? nearestKm;
+
+	/// Peak fire radiative power (MW) among detections within radius.
+	final double? maxFrp;
+
+	/// The search radius (km) the fetcher used — needed to scale the penalty.
+	final int radiusKm;
+
+	/// FIRMS feed the detections came from (e.g. VIIRS_NOAA20_NRT).
+	final String? source;
+
+	/// UTC date the snapshot was taken (display only).
+	final String? asOf;
+
+	const FiresNearby({
+		required this.count,
+		this.nearestKm,
+		this.maxFrp,
+		required this.radiusKm,
+		this.source,
+		this.asOf,
+	});
+
+	/// Deserializes from the fetcher's `firesNearby` JSON. Numeric fields use
+	/// null-safe casts (a missing count/radius defaults to 0 — a degenerate
+	/// no-penalty state — rather than throwing).
+	factory FiresNearby.fromJson(Map<String, dynamic> json) => FiresNearby(
+		count: (json['count'] as num?)?.toInt() ?? 0,
+		nearestKm: (json['nearestKm'] as num?)?.toDouble(),
+		maxFrp: (json['maxFrp'] as num?)?.toDouble(),
+		radiusKm: (json['radiusKm'] as num?)?.toInt() ?? 0,
+		source: json['source'] as String?,
+		asOf: json['asOf'] as String?,
+	);
+
+	Map<String, dynamic> toJson() => {
+		'count': count,
+		'nearestKm': nearestKm,
+		'maxFrp': maxFrp,
+		'radiusKm': radiusKm,
+		'source': source,
+		'asOf': asOf,
+	};
+}
+
 /// One location's weather forecast — the top-level container.
 ///
 /// Contains hourly weather data (typically 72 hours / 3 days) and

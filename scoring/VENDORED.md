@@ -34,6 +34,13 @@ exists in both — independently maintained.
   Phase-1 location-scoring redesign (geometry-aware moon `moonBurden` +
   `locationSkyBrightnessScore`; a 250 hPa jet seeing input; an AOD transparency
   factor; a cloud gate; the darkness factor removed). astrowidget-specific.
+- `scoreLocation` gained an optional `FiresNearby? firesNearby` param (2026-06-25):
+  applies a capped transparency penalty from NASA FIRMS active-fire proximity, plus
+  a ⚠ advisory reason. Optional, so it does not break astroplan callers. The
+  `FiresNearby` model lives in `lib/weather/weather_models.dart`; the wrapper
+  `bin/score_location.dart` parses `firesNearby` from the per-site JSON and the NB
+  composite inherits the docked transparency. Back-ports to astroplan as an engine
+  transparency input if the refined models flow back.
 - `test/` + the `test:` dev-dependency — astrowidget's own Dart unit tests for the
   redesign physics (NOT vendored from astroplan, which ships no tests here). Run
   with `dart test`. The Python suite under `../tests/` exercises the compiled

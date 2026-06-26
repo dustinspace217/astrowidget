@@ -180,6 +180,22 @@ function SiteRow({ site }) {
             )}
           </div>
           {best && <div className={bestLine}>{best}</div>}
+          {/* Smoke / air quality (2026-06-25): AOD column-aerosol + surface AQI. */}
+          {night.smoke && night.smoke.aodMean != null && (
+            <div className={muted}>
+              Smoke: AOD {night.smoke.aodMean.toFixed(2)}
+              {night.smoke.usAqi != null ? ` · AQI ${night.smoke.usAqi}` : ""}
+            </div>
+          )}
+          {/* Active-fire advisory — this surface does not render the reasons list,
+              so the ⚠ line is added explicitly here. */}
+          {night.smoke && night.smoke.firesNearby && (
+            <div style={{ color: "#fbbf24", fontSize: "11px", marginTop: "3px" }}>
+              ⚠ {night.smoke.firesNearby.count} active fire(s) within{" "}
+              {night.smoke.firesNearby.radiusKm} km (nearest{" "}
+              {Math.round(night.smoke.firesNearby.nearestKm)} km)
+            </div>
+          )}
         </>
       )}
     </div>

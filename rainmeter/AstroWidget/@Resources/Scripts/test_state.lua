@@ -74,7 +74,8 @@ local FIXTURE = [[
         "broadband": { "score": 88 }, "narrowband": { "score": 93 },
         "managed": true,
         "dark_window": { "duration_minutes": 600 }, "best_window": null,
-        "displayFactors": { "cloudPct": 3 } } ] },
+        "displayFactors": { "cloudPct": 3 },
+        "smoke": { "aodMean": 0.12, "firesNearby": { "count": 4, "nearestKm": 60, "radiusKm": 150 } } } ] },
     { "id": "down", "label": "Offline Site", "status": "error",
       "error": "API failure", "nights": [] }
   ]
@@ -92,6 +93,8 @@ check('build: site1 not managed', rows[1].managed, false)
 check('build: site1 best non-empty', rows[1].best ~= '', true)
 check('build: site2 managed', rows[2].managed, true)
 check('build: site2 best hidden (clear)', rows[2].best, '')
+check('build: site2 aod', rows[2].aod, 0.12)
+check('build: site2 fireCount', rows[2].fireCount, 4)
 check('build: site3 not ok', rows[3].ok, false)
 check('build: site3 error text', rows[3].err, 'API failure')
 
@@ -102,7 +105,7 @@ check('Count()', Count(), 3)
 check('LineA(1) plain', LineA(1), 'Backyard   NB only')
 check('LineA(2) REMOTE badge', LineA(2), 'Remote Dome   [REMOTE]   BB+NB')
 check('LineB(1) detail', LineB(1):match('^BB 48   NB 71   62%% cloud   Best clear:') ~= nil, true)
-check('LineB(2) no best-clear (clear)', LineB(2), 'BB 88   NB 93   3% cloud')
+check('LineB(2) clear + fire/AOD', LineB(2), 'BB 88   NB 93   3% cloud   ! 4 fires 60km   AOD 0.12')
 check('LineB(3) shows error', LineB(3), 'API failure')
 check('Color(1) amber (NB only)', Color(1), '235,175,45,255')
 check('Color(2) green (BB+NB)', Color(2), '80,200,120,255')

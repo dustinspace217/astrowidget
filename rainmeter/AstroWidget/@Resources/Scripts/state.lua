@@ -109,6 +109,18 @@ local function build(state)
       local df = night.displayFactors
       row.cloud = (type(df) == 'table') and df.cloudPct or nil
       row.best = bestClear(night)
+      -- Smoke block (2026-06-25): AOD + nearby active-fire count/distance, folded
+      -- into the detail line below (this skin has no reasons list and fixed Y slots,
+      -- so a dedicated line would mean recomputing every absolute Y offset).
+      local smoke = night.smoke
+      if type(smoke) == 'table' then
+        row.aod = smoke.aodMean
+        local fn = smoke.firesNearby
+        if type(fn) == 'table' then
+          row.fireCount = fn.count
+          row.fireNear = fn.nearestKm
+        end
+      end
       row.err = nil
     else
       row.err = site.error or 'No forecast tonight.'
@@ -140,6 +152,13 @@ function LineB(i)
   if not r.ok then return r.err or '' end
   local s = 'BB ' .. r.bb .. '   NB ' .. r.nb
   if r.cloud ~= nil then s = s .. '   ' .. r.cloud .. '% cloud' end
+  -- Active-fire advisory FIRST (highest value; ClipString may trim the tail), then
+  -- AOD. Plain ASCII '!' marker — the skin font may lack the warning glyph.
+  if r.fireCount and r.fireCount > 0 then
+    s = s .. '   ! ' .. r.fireCount .. ' fires'
+    if r.fireNear then s = s .. ' ' .. math.floor(r.fireNear + 0.5) .. 'km' end
+  end
+  if r.aod then s = s .. '   AOD ' .. string.format('%.2f', r.aod) end
   if r.best and r.best ~= '' then s = s .. '   ' .. r.best end
   return s
 end

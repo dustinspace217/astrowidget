@@ -368,6 +368,24 @@ ColumnLayout {
 			value: col.df && col.df.visibilityKm !== undefined && col.df.visibilityKm !== null
 				? col.df.visibilityKm + " km" : "—"
 		}
+
+		// Smoke / air quality (2026-06-25). AOD is the column-aerosol transparency
+		// driver; AQI is the surface cross-check. Both from night.smoke. The ⚠
+		// active-fire advisory rides the reasons list below, so it is not duplicated
+		// here. "—" when no smoke data (a non-US site has no AQI; AOD may still show).
+		FactorRow {
+			label: qsTr("Smoke / AQI")
+			value: {
+				if (!col.night || !col.night.smoke) return "—";
+				const s = col.night.smoke;
+				let parts = [];
+				if (s.aodMean !== undefined && s.aodMean !== null)
+					parts.push("AOD " + s.aodMean.toFixed(2));
+				if (s.usAqi !== undefined && s.usAqi !== null)
+					parts.push("AQI " + s.usAqi);
+				return parts.length ? parts.join(" · ") : "—";
+			}
+		}
 	}
 
 	// ── Scoring breakdown (the engine's verdict math) ────────────────────

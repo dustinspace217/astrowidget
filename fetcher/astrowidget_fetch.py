@@ -673,14 +673,18 @@ def fetch_open_meteo_air_quality(lat: float, lon: float) -> dict[str, list[Any]]
 	never abort the run (spec §7: the score stays fully functional on the free
 	baseline).
 
+	Also requests us_aqi + pm2_5 on the SAME call (no extra request) for the smoke
+	feature's surfacing layer — the scorer still reads only AOD; AQI/PM2.5 feed the
+	per-night smoke block the UIs show. us_aqi is null outside the US.
+
 	Receives: lat, lon — decimal degrees.
-	Returns: the "hourly" dict ({"time": [...], "aerosol_optical_depth": [...]}),
-	    or {} on failure.
+	Returns: the "hourly" dict ({"time": [...], "aerosol_optical_depth": [...],
+	    "us_aqi": [...], "pm2_5": [...]}), or {} on failure.
 	"""
 	params: dict[str, Any] = {
 		"latitude": lat,
 		"longitude": lon,
-		"hourly": "aerosol_optical_depth",
+		"hourly": "aerosol_optical_depth,us_aqi,pm2_5",
 		"forecast_days": OPEN_METEO_FORECAST_DAYS,
 		"timezone": "UTC",
 	}
@@ -710,11 +714,12 @@ def build_air_quality_rows(aq_hourly: dict[str, list[Any]]) -> list[dict[str, An
 	    is NOT scored as zero (absence ≠ worst transparency; that inversion is the
 	    Phase-1 null-polarity rule, mirrored from the 250 hPa handling above).
 
-	Only "time" + "aerosol_optical_depth" are emitted: AirQuality.fromJson defaults
-	every other field (pm2_5, us_aqi, …) to 0 and the scorer reads only AOD, so an
-	AOD-only row is a complete, valid AirQuality. We pair element-wise and stop at
-	the shorter array so a truncated AOD response never fabricates tail hours (the
-	same length-mismatch defense merge_hourly uses).
+	Emits "time" + "aerosol_optical_depth" + "us_aqi" + "pm2_5" per hour. The Dart
+	AirQuality.fromJson reads AOD for scoring and tolerates the rest; the fetcher
+	reads us_aqi/pm2_5 back out for the per-night smoke block. We pair element-wise
+	on the time/AOD arrays and stop at the shorter so a truncated AOD response never
+	fabricates tail hours; a SHORTER us_aqi/pm2_5 column defaults its tail hours to
+	None rather than a fabricated 0 (null ≠ clean air — the Phase-1 polarity rule).
 	"""
 	if not aq_hourly:
 		return []
@@ -728,6 +733,13 @@ def build_air_quality_rows(aq_hourly: dict[str, list[Any]]) -> list[dict[str, An
 	# non-empty list as "no AOD" and omit transparency downstream.
 	if not isinstance(times, list) or not isinstance(aod, list) or not times:
 		return []
+	# us_aqi / pm2_5 are surfacing-only (the scorer reads AOD). Same present-but-null
+	# / non-list defensiveness as AOD: coerce anything that isn't a list to [] so the
+	# per-hour index below safely defaults missing/short tail hours to None.
+	aqi = aq_hourly.get("us_aqi")
+	pm25 = aq_hourly.get("pm2_5")
+	aqi = aqi if isinstance(aqi, list) else []
+	pm25 = pm25 if isinstance(pm25, list) else []
 	n = min(len(times), len(aod))
 	rows: list[dict[str, Any]] = []
 	for i in range(n):
@@ -737,7 +749,12 @@ def build_air_quality_rows(aq_hourly: dict[str, list[Any]]) -> list[dict[str, An
 		# treats as no-smoke-data — preferable to a confident NaN-derived reading.
 		if isinstance(v, float) and not math.isfinite(v):
 			v = None
-		rows.append({"time": times[i], "aerosol_optical_depth": v})
+		rows.append({
+			"time": times[i],
+			"aerosol_optical_depth": v,
+			"us_aqi": aqi[i] if i < len(aqi) else None,
+			"pm2_5": pm25[i] if i < len(pm25) else None,
+		})
 	return rows
 
 

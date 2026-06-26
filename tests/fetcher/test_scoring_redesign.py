@@ -98,9 +98,13 @@ def test_build_air_quality_rows_pairs_time_and_aod():
 		"time": ["2026-06-09T00:00", "2026-06-09T01:00"],
 		"aerosol_optical_depth": [0.07, 0.12],
 	})
+	# Rows now also carry us_aqi/pm2_5 (smoke feature, 2026-06-25); absent in this
+	# input, so they default to None per the null-polarity rule.
 	assert rows == [
-		{"time": "2026-06-09T00:00", "aerosol_optical_depth": 0.07},
-		{"time": "2026-06-09T01:00", "aerosol_optical_depth": 0.12},
+		{"time": "2026-06-09T00:00", "aerosol_optical_depth": 0.07,
+		 "us_aqi": None, "pm2_5": None},
+		{"time": "2026-06-09T01:00", "aerosol_optical_depth": 0.12,
+		 "us_aqi": None, "pm2_5": None},
 	]
 
 
@@ -109,7 +113,8 @@ def test_build_air_quality_rows_nonfinite_aod_becomes_none():
 	rows = fx.build_air_quality_rows({
 		"time": ["2026-06-09T00:00"], "aerosol_optical_depth": [float("nan")],
 	})
-	assert rows == [{"time": "2026-06-09T00:00", "aerosol_optical_depth": None}]
+	assert rows == [{"time": "2026-06-09T00:00", "aerosol_optical_depth": None,
+		"us_aqi": None, "pm2_5": None}]
 
 
 def test_build_air_quality_rows_stops_at_shorter_array():

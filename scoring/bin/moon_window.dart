@@ -37,6 +37,12 @@ class MoonNightGeometry {
 	});
 }
 
+/// A moon-free window shorter than this isn't a real broadband opportunity, and slicing the
+/// seeing factor over a <1h window hits the engine's degenerate-stability sentinel (which made
+/// Moon-free BB read a misleading 50 on a 15-min dawn gap — caught by running the real binary
+/// 2026-06-29). 60 min ≈ a usable LRGB stint. freeFraction still reports the true proportion.
+const int _minMoonFreeWindowMinutes = 60;
+
 /// Summarize the moon's night from its 15-min altitude samples (pure; the wrapper does the
 /// geoengine sampling). [samples] is bounded (dark window / 15 min ≈ ≤ ~100). [darkStart]/
 /// [darkEnd] bound the moon-free fraction denominator.
@@ -89,9 +95,13 @@ MoonNightGeometry computeMoonGeometry(
 	final darkMs = darkEnd.difference(darkStart).inMilliseconds;
 	final freeFraction =
 		darkMs <= 0 ? 0.0 : (best.inMilliseconds / darkMs).clamp(0.0, 1.0);
-	// Surface the window only for the genuine partial case (see doc above).
-	final showWindow =
-		bestStart != null && freeFraction > 0.0 && freeFraction < 1.0;
+	// Surface the window only for a genuine, USABLE partial gap: not the whole night
+	// (freeFraction 0/1 → no gap / redundant with BB), and at least _minMoonFreeWindowMinutes
+	// long (sub-hour slivers aren't imaging opportunities and degenerate the sliced seeing).
+	final showWindow = bestStart != null &&
+		freeFraction > 0.0 &&
+		freeFraction < 1.0 &&
+		best.inMinutes >= _minMoonFreeWindowMinutes;
 	return MoonNightGeometry(
 		avgSinAlt: sumSin / samples.length,
 		maxAltDeg: maxAlt,

@@ -329,3 +329,54 @@ def test_binary_ignores_malformed_firesnearby(tmp_path):
 		stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
 	result = json.loads(out.stdout)
 	assert result["sites"][0]["status"] == "ok", "malformed firesNearby must not crash"
+
+
+def _clear_hourly(start, n=110):
+	"""n clear-sky hourly entries from `start` (UTC) — enough to cover several scored nights."""
+	out = []
+	for i in range(n):
+		t = (start + timedelta(hours=i)).isoformat().replace("+00:00", "Z")
+		out.append({"time": t, "cloud_cover": 3, "cloud_cover_low": 0,
+					"cloud_cover_mid": 0, "cloud_cover_high": 0,
+					"relative_humidity_2m": 35, "temperature_2m": 14.0,
+					"dewpoint_2m": 1.0, "wind_speed_10m": 6, "wind_gusts_10m": 9,
+					"precipitation_probability": 0, "precipitation": 0,
+					"visibility": 60000, "wind_speed_250hPa": 18})
+	return out
+
+
+def _run_clear_nights(now_utc):
+	"""Score a clear-sky site at lat 45 from now_utc; return its nights (real moon ephemeris)."""
+	start = datetime.fromisoformat(now_utc.replace("Z", "+00:00"))
+	payload = {"now_utc": now_utc, "sites": [{"id": "s", "label": "S", "lat": 45.0,
+			   "lon": -120.0, "hourly": _clear_hourly(start), "firesNearby": None}]}
+	out = subprocess.run([str(fx.SCORING_BINARY)], input=json.dumps(payload).encode(),
+						 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
+	return json.loads(out.stdout)["sites"][0]["nights"]
+
+
+def test_partial_moon_emits_moonfree_window_and_bb():
+	"""Moon-window feature (2026-06-29): a waning night (moon down for the early hours)
+	surfaces a usable moon-free window + a Moon-free BB score, and every night carries
+	moon.freeFraction. Uses real moon ephemeris (deterministic)."""
+	nights = _run_clear_nights("2026-07-07T20:00:00Z")
+	assert nights, "expected scored nights"
+	for n in nights:
+		assert isinstance(n["moon"]["freeFraction"], (int, float))
+	withgap = [n for n in nights if n["moonFreeBroadband"] is not None]
+	assert withgap, "expected at least one partial-moon night with Moon-free BB"
+	n = withgap[0]
+	assert 0 < n["moon"]["freeFraction"] < 1
+	assert n["moon"]["freeWindow"] is not None
+	mfb = n["moonFreeBroadband"]
+	assert isinstance(mfb["score"], int)
+	assert mfb["window"]["start"] < mfb["window"]["end"]
+
+
+def test_subhour_moonfree_gap_is_suppressed():
+	"""A near-full night whose only moon-free time is a sub-hour dawn sliver reports the
+	true proportion but does NOT surface a (degenerate-stability) Moon-free BB."""
+	tonight = _run_clear_nights("2026-07-03T20:00:00Z")[0]
+	assert tonight["moon"]["freeFraction"] < 0.05  # moon up ~all night
+	assert tonight["moonFreeBroadband"] is None
+	assert tonight["moon"]["freeWindow"] is None

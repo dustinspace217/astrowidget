@@ -27,12 +27,20 @@ void main() {
 			expect(g.avgSinAlt, greaterThan(0));
 		});
 
-		test('moon rises mid-window → window is the early below-horizon run', () {
-			final g = computeMoonGeometry(_ramp(-20, 40, 8), _t(0), _t(105));
+		test('moon rises mid-window → window is the early below-horizon run (≥1h)', () {
+			// 10 samples over 135 min, alt -30→30. First 5 below horizon → a 75-min gap.
+			final g = computeMoonGeometry(_ramp(-30, 30, 10), _t(0), _t(135));
 			expect(g.freeFraction, greaterThan(0));
 			expect(g.freeFraction, lessThan(1));
 			expect(g.moonFreeWindow!.start, _t(0));
-			expect(g.moonFreeWindow!.end, _t(45)); // first 3 samples are below horizon
+			expect(g.moonFreeWindow!.end, _t(75)); // first 5 samples below horizon
+		});
+
+		test('sub-hour moon-free gap is NOT surfaced (degenerate-window guard)', () {
+			// 8 samples; first 2 below horizon → only a 30-min gap (< 60 min minimum).
+			final g = computeMoonGeometry(_ramp(-15, 45, 8), _t(0), _t(105));
+			expect(g.freeFraction, greaterThan(0)); // true proportion still reported
+			expect(g.moonFreeWindow, isNull); // but no usable window surfaced
 		});
 
 		test('maxAltDeg is the peak (still emitted for display)', () {

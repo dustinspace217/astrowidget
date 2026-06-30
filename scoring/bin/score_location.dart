@@ -34,9 +34,11 @@ import 'dart:io';
 import 'package:astrowidget_scoring/astro/moon_geometry.dart';
 import 'package:astrowidget_scoring/astro/visibility.dart';
 import 'package:astrowidget_scoring/scoring/scoring_engine.dart';
+import 'package:astrowidget_scoring/scoring/sky_brightness.dart'; // locationSkyBrightnessScore (NB moon dock baseline)
 import 'package:astrowidget_scoring/scoring/veto_evaluator.dart';
 import 'package:astrowidget_scoring/weather/weather_models.dart';
 import 'narrowband.dart'; // astrowidget's own NB sky model (DEF-V2-03)
+import 'moon_window.dart'; // averaged burden + moon-free window + NB moon dock (2026-06-29)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Narrowband composite
@@ -415,6 +417,7 @@ Map<String, dynamic> _scoreOneNight({
 			// Keep the schema-2 top-level keys present even in this degenerate path
 			// so consumers never hit an undefined best_window/managed.
 			'best_window': null,
+			'moonFreeBroadband': null,
 			'managed': managed,
 			'recommendation': 'Neither',
 			'reasons': ['No astronomical darkness on this date.'],
@@ -429,44 +432,43 @@ Map<String, dynamic> _scoreOneNight({
 	);
 	final moonIllum = moonIllumination(midpoint);
 
-	// Maximum moon altitude during the dark window — useful for users to
-	// see at-a-glance whether the moon is above the horizon during their
-	// imaging hours. Sample every 15 minutes from start to end and take
-	// the max. 15 min is sub-degree precision (moon moves ~0.5°/2 min).
-	double maxMoonAlt = -90.0;
-	final stepMs = 15 * 60 * 1000;  // 15 minutes
+	// Sample the moon's altitude every 15 minutes across the dark window (sub-degree
+	// precision — the moon moves ~0.5°/2 min). From these samples the geometry helper
+	// derives (a) the TIME-AVERAGED burden basis — within a night the sky background tracks
+	// the moon's INSTANTANEOUS altitude at r=0.96 (9,931-sub calibration 2026-06-29), so the
+	// old PEAK-altitude penalty over-charged every partial-moon night — and (b) the moon-free
+	// window (the broadband-usable gap to surface + score).
+	final moonSamples = <MoonSample>[];
+	final stepMs = 15 * 60 * 1000; // 15 minutes
 	for (int t = darkWindow.start!.millisecondsSinceEpoch;
 		 t <= darkWindow.end!.millisecondsSinceEpoch;
 		 t += stepMs) {
 		final sampleTime = DateTime.fromMillisecondsSinceEpoch(t, isUtc: true);
 		try {
-			final pos = getMoonPosition(
-				sampleTime,
-				latitude: lat,
-				longitude: lon,
-			);
-			if (pos.altitude > maxMoonAlt) {
-				maxMoonAlt = pos.altitude;
-			}
+			final pos = getMoonPosition(sampleTime, latitude: lat, longitude: lon);
+			moonSamples.add(MoonSample(time: sampleTime, altitudeDeg: pos.altitude));
 		} on Exception {
-			// Tolerate geoengine throwing on edge cases (rare). Sample is
-			// skipped; max stays at whatever it was.
+			// Tolerate geoengine throwing on edge cases (rare); skip the sample.
 			continue;
 		}
 	}
+	final moonGeom =
+		computeMoonGeometry(moonSamples, darkWindow.start!, darkWindow.end!);
+	// The effective altitude whose moonBurden equals the time-AVERAGED burden — passing it
+	// to the scorers applies the average with no engine signature change.
+	final scoringAltitude = effectiveMoonAltitudeDeg(moonGeom.avgSinAlt);
+	final maxMoonAlt = moonGeom.maxAltDeg; // peak, kept for the display field
 
-	// Broadband baseline: call the engine. Phase-1 — pass the site Bortle (sky-
-	// brightness baseline) and the moon's PEAK altitude across the dark window
-	// (maxMoonAlt, computed above) so the geometry-aware moon burden applies. Using
-	// the peak is a conservative whole-night summary: a moon high for any part of
-	// the night compromises that part. (managed is NOT passed — the engine scores
-	// uniformly; the HOME/REMOTE split is the precip veto policy below.)
+	// Broadband baseline: call the engine with the site Bortle and the time-AVERAGED moon
+	// altitude (scoringAltitude — see above) so the geometry-aware burden reflects when the
+	// moon is actually up, not its peak. (managed is NOT passed — the engine scores uniformly;
+	// the HOME/REMOTE split is the precip veto policy below.)
 	final loc = scoreLocation(
 		forecast: forecast,
 		darkWindow: darkWindow,
 		moonIlluminationPercent: moonIllum,
 		siteBortle: siteBortle,
-		moonAltitude: maxMoonAlt,
+		moonAltitude: scoringAltitude,
 		firesNearby: firesNearby,
 	);
 
@@ -535,13 +537,27 @@ Map<String, dynamic> _scoreOneNight({
 		? 0.0
 		: windowHours.map((h) => h.snowDepth).reduce((a, b) => a + b) /
 			windowHours.length;
-	final nbSky = narrowbandSkyScore(
+	// NB sky via the SCORE-SPACE moon dock (calibration 2026-06-29, 9,931 subs): narrowband
+	// loses 0.25× of broadband's moon hit. Get the LP/snow-only NB baseline (moon OFF) and
+	// the BB sky with vs without the (averaged) moon, then dock the moon in score space — a
+	// magnitude coupling is eaten by the score curve's 21.5-mag clamp (see moon_window.dart).
+	final nbSkyNoMoon = narrowbandSkyScore(
 		bortle: siteBortle,
-		moonIlluminationPercent: moonIllum,
-		moonAltitudeDeg: maxMoonAlt,
+		moonIlluminationPercent: 0, // moon OFF → LP/snow continuum only
+		moonAltitudeDeg: -90,
 		snowDepthM: meanSnowDepth,
 		leakage: nbLeakage,
 	);
+	final bbSkyNoMoon = locationSkyBrightnessScore(
+		bortle: siteBortle,
+		moonIlluminationPercent: 0,
+		moonAltitudeDeg: -90,
+		snowDepthM: meanSnowDepth,
+	);
+	// BB sky WITH the averaged moon (the engine just computed it). Fallback to the no-moon
+	// value on the overcast early-return path, where the engine omits skyBrightness.
+	final bbSkyMoon = loc.factorScores['skyBrightness'] ?? bbSkyNoMoon;
+	final nbSky = narrowbandMoonAdjustedSky(nbSkyNoMoon, bbSkyNoMoon, bbSkyMoon);
 	final nbScores = <String, int>{
 		'cloud': loc.factorScores['cloud'] ?? 0,
 		'stability': loc.factorScores['stability'] ?? 0,
@@ -587,6 +603,33 @@ Map<String, dynamic> _scoreOneNight({
 
 	final durationMinutes = darkWindow.end!.difference(darkWindow.start!).inMinutes;
 
+	// Moon-free BB (calibration 2026-06-29): the broadband score achievable in the moon-free
+	// gap — a SECOND engine pass over that sub-window (userWindow slices cloud/seeing/
+	// transparency to it), moon DOWN (altitude -90 → zero burden). computeMoonGeometry returns
+	// the window ONLY for a genuine partial gap (0 < freeFraction < 1), so this is null on
+	// no-moon and moon-up-all-night nights (display hides it then — see the spec regime table).
+	final moonFreeWindow = moonGeom.moonFreeWindow;
+	Map<String, dynamic>? moonFreeBroadband;
+	if (moonFreeWindow != null) {
+		final mf = scoreLocation(
+			forecast: forecast,
+			darkWindow: darkWindow,
+			moonIlluminationPercent: moonIllum,
+			userWindow: moonFreeWindow,
+			siteBortle: siteBortle,
+			moonAltitude: -90.0, // moon below horizon → zero burden over the gap
+			firesNearby: firesNearby,
+		);
+		moonFreeBroadband = {
+			'score': mf.score,
+			'verdict': mf.verdict.name,
+			'window': {
+				'start': moonFreeWindow.start.toIso8601String(),
+				'end': moonFreeWindow.end.toIso8601String(),
+			},
+		};
+	}
+
 	return {
 		'label': label,
 		'dark_window': {
@@ -597,6 +640,13 @@ Map<String, dynamic> _scoreOneNight({
 		'moon': {
 			'illumination_pct': moonIllum,
 			'max_alt_during_dark': maxMoonAlt,
+			'freeFraction': moonGeom.freeFraction,
+			'freeWindow': moonFreeWindow == null
+				? null
+				: {
+					'start': moonFreeWindow.start.toIso8601String(),
+					'end': moonFreeWindow.end.toIso8601String(),
+				},
 		},
 		'broadband': {
 			'score': loc.score,
@@ -610,6 +660,10 @@ Map<String, dynamic> _scoreOneNight({
 			'vetoes': vetoes, // same hard-stop vetoes apply
 			'method': _nbMethod, // 'nb-model-v1' — real forward model, first-principles-uncalibrated
 		},
+		// The broadband score you could get by shooting LRGB in the moon-free gap (null on
+		// no-moon / moon-up-all-night). Display-only; does NOT drive the headline pill (which
+		// uses the averaged-moon broadband score above).
+		'moonFreeBroadband': moonFreeBroadband,
 		// Best clear-sky window within the dark window (≤30% cloud), or null if
 		// none. The structured form of the localized "Best window" reason — the
 		// HOME-mode gambling aid (where the gaps are). UTC ISO-8601; UI localizes.

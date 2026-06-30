@@ -43,6 +43,23 @@ void main() {
 			expect(g.moonFreeWindow, isNull); // but no usable window surfaced
 		});
 
+		test('moon down all night with OFF-GRID darkEnd → freeFraction 1.0, no window', () {
+			// QA-2026-06-30 regression (adversarial-tester + code-reviewer): the 15-min grid
+			// stops short of darkEnd (dark windows aren't 15-min multiples). Measured to the
+			// last sample, a moon-down-all-night run gave freeFraction ≈ 0.96 < 1 and spuriously
+			// surfaced a redundant whole-night window. darkEnd is 7 min past the last sample.
+			final g = computeMoonGeometry(_ramp(-40, -10, 8), _t(0), _t(112));
+			expect(g.freeFraction, 1.0);
+			expect(g.moonFreeWindow, isNull);
+		});
+
+		test('exactly-60-min gap IS surfaced (gate is ≥60, not >60)', () {
+			// samples 0-3 below horizon (t0..t45), sample 4 (t60) above → a 60-min run.
+			final g = computeMoonGeometry(_ramp(-25, 25, 8), _t(0), _t(105));
+			expect(g.moonFreeWindow, isNotNull);
+			expect(g.moonFreeWindow!.end, _t(60));
+		});
+
 		test('maxAltDeg is the peak (still emitted for display)', () {
 			final g = computeMoonGeometry(_ramp(-20, 40, 8), _t(0), _t(105));
 			expect(g.maxAltDeg, closeTo(40, 0.001));
@@ -64,6 +81,14 @@ void main() {
 		test('clamps avgSinAlt to [0,1] (no asin domain error)', () {
 			expect(effectiveMoonAltitudeDeg(0.0), 0.0);
 			expect(effectiveMoonAltitudeDeg(1.0), closeTo(90, 1e-9));
+		});
+
+		test('averaged effective altitude is BELOW the peak (the averaging claim)', () {
+			// A rising moon: the time-averaged altitude (hence the effective scoring altitude
+			// the wrapper feeds the engine) must be below the peak — the whole point of
+			// averaging vs the old peak-altitude penalty.
+			final g = computeMoonGeometry(_ramp(0, 40, 8), _t(0), _t(105));
+			expect(effectiveMoonAltitudeDeg(g.avgSinAlt), lessThan(g.maxAltDeg));
 		});
 	});
 

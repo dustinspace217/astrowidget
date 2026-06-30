@@ -440,17 +440,28 @@ Map<String, dynamic> _scoreOneNight({
 	// window (the broadband-usable gap to surface + score).
 	final moonSamples = <MoonSample>[];
 	final stepMs = 15 * 60 * 1000; // 15 minutes
+	var moonSampleFailures = 0;
+	var iterations = 0;
+	const maxMoonSamples = 200; // Power-of-Ten rule 2 backstop (~96 expected for a ≤24h window)
 	for (int t = darkWindow.start!.millisecondsSinceEpoch;
 		 t <= darkWindow.end!.millisecondsSinceEpoch;
 		 t += stepMs) {
+		if (++iterations > maxMoonSamples) break; // a corrupt darkWindow can't spin unboundedly
 		final sampleTime = DateTime.fromMillisecondsSinceEpoch(t, isUtc: true);
 		try {
 			final pos = getMoonPosition(sampleTime, latitude: lat, longitude: lon);
 			moonSamples.add(MoonSample(time: sampleTime, altitudeDeg: pos.altitude));
 		} on Exception {
-			// Tolerate geoengine throwing on edge cases (rare); skip the sample.
-			continue;
+			moonSampleFailures++; // skip this sample, but COUNT it (checked below)
 		}
+	}
+	// A TOTAL sampling failure must not SILENTLY alias onto "moonless": empty samples →
+	// avgSinAlt 0 → zero burden → a full moon would score as no-moon (BB reads green on a
+	// washed-out night). Surface it on stderr — the wrapper's diagnostic channel, same
+	// discipline as the firesNearby shape guard (QA 2026-06-30, silent-failure-hunter).
+	if (moonSamples.isEmpty) {
+		stderr.writeln('astrowidget-score: moon geometry unavailable for "$label" '
+			'($moonSampleFailures sample(s) failed) — this night is scored as moonless.');
 	}
 	final moonGeom =
 		computeMoonGeometry(moonSamples, darkWindow.start!, darkWindow.end!);

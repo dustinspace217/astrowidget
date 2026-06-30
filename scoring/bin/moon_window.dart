@@ -90,7 +90,12 @@ MoonNightGeometry computeMoonGeometry(
 			closeRun(s.time); // moon rose → close the run at this sample
 		}
 	}
-	closeRun(samples.last.time); // close a run that reaches the window end
+	// Close a run still open at the end against darkEnd, NOT samples.last: the 15-min grid
+	// stops short of darkEnd (dark windows aren't 15-min multiples), so measuring a
+	// moon-down-all-night run to the last sample undercounts it to freeFraction ≈ 0.96 < 1.0,
+	// which defeats the freeFraction<1 guard and spuriously surfaces a redundant whole-night
+	// "moon-free" window (QA 2026-06-30, found by adversarial-tester + code-reviewer).
+	closeRun(darkEnd);
 
 	final darkMs = darkEnd.difference(darkStart).inMilliseconds;
 	final freeFraction =
@@ -142,6 +147,9 @@ int narrowbandMoonAdjustedSky(
 	int bbSkyMoon, {
 	double coupling = nbMoonCouplingDefault,
 }) {
-	final bbMoonDrop = bbSkyNoMoon - bbSkyMoon; // ≥ 0 (moon never brightens)
+	// ≥ 0 structurally (the moon never brightens the sky, so bbSkyMoon ≤ bbSkyNoMoon), but
+	// clamp defensively so a future divergence between the moon-on / moon-off BB paths can't
+	// INFLATE NB above its no-moon value (QA 2026-06-30, defensive).
+	final bbMoonDrop = (bbSkyNoMoon - bbSkyMoon).clamp(0, 100);
 	return (nbSkyNoMoon - coupling * bbMoonDrop).round().clamp(0, 100);
 }

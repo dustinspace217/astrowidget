@@ -91,6 +91,16 @@ local function bestClear(night)
   return 'Best clear: ' .. localClock(bw.start) .. '-' .. localClock(bw['end'])
 end
 
+-- "Moon-free: 11:30pm-1:00am (BB 90)" — the broadband-usable gap on a partial-moon night,
+-- with the broadband score achievable in it. Empty unless moonFreeBroadband is present (a
+-- usable ≥1h gap; the scorer emits null on full-moon / no-moon / sub-hour-sliver nights).
+local function moonFree(night)
+  local mf = night.moonFreeBroadband
+  if type(mf) ~= 'table' or type(mf.window) ~= 'table' then return '' end
+  return 'Moon-free: ' .. localClock(mf.window.start) .. '-' .. localClock(mf.window['end'])
+    .. ' (BB ' .. (mf.score or 0) .. ')'
+end
+
 -- Normalize a decoded state table into flat ROWS the meters consume. Pure +
 -- testable: takes the decoded table, returns (rows, updatedString).
 local function build(state)
@@ -109,6 +119,7 @@ local function build(state)
       local df = night.displayFactors
       row.cloud = (type(df) == 'table') and df.cloudPct or nil
       row.best = bestClear(night)
+      row.moonFree = moonFree(night)
       -- Smoke block (2026-06-25): AOD + nearby active-fire count/distance, folded
       -- into the detail line below (this skin has no reasons list and fixed Y slots,
       -- so a dedicated line would mean recomputing every absolute Y offset).
@@ -160,6 +171,7 @@ function LineB(i)
   end
   if r.aod then s = s .. '   AOD ' .. string.format('%.2f', r.aod) end
   if r.best and r.best ~= '' then s = s .. '   ' .. r.best end
+  if r.moonFree and r.moonFree ~= '' then s = s .. '   ' .. r.moonFree end
   return s
 end
 

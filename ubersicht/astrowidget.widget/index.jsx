@@ -180,6 +180,17 @@ function SiteRow({ site }) {
             )}
           </div>
           {best && <div className={bestLine}>{best}</div>}
+          {/* Moon-free window (2026-06-29): the broadband-usable gap on a partial-moon
+              night + the broadband score achievable in it. Present only for a usable (≥1h)
+              gap; null on full-moon / no-moon / sub-hour nights. Accent tint, not the green
+              best-clear (cloud gap vs moon gap). */}
+          {night.moonFreeBroadband && (
+            <div className={bestLine} style={{ color: "#7cc7ff" }}>
+              Moon-free: {localTime(night.moonFreeBroadband.window.start)} →{" "}
+              {localTime(night.moonFreeBroadband.window.end)} (BB{" "}
+              {night.moonFreeBroadband.score})
+            </div>
+          )}
           {/* Smoke / air quality (2026-06-25): AOD column-aerosol + surface AQI. */}
           {night.smoke && night.smoke.aodMean != null && (
             <div className={muted}>

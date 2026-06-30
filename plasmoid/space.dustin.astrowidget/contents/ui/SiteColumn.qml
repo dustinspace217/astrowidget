@@ -225,6 +225,30 @@ ColumnLayout {
 		elide: Text.ElideRight
 	}
 
+	// Moon-free window line (2026-06-29) — the broadband-usable gap on a partial-moon
+	// night, with the broadband score achievable in it (the "shoot LRGB here" hint).
+	// Present ONLY when there's a usable (≥1h) gap; moonFreeBroadband is null on full-moon,
+	// no-moon, and sub-hour-sliver nights. Distinct from "Best clear" above (cloud gap vs
+	// moon gap) — accent tint instead of green keeps them from reading as the same window.
+	PlasmaComponents.Label {
+		visible: !!(col.night && col.night.moonFreeBroadband)
+		text: {
+			if (!col.night || !col.night.moonFreeBroadband) return "";
+			const mf = col.night.moonFreeBroadband;
+			const startDate = new Date(mf.window.start);
+			const start = Qt.formatTime(startDate, "HH:mm");
+			const end = Qt.formatTime(new Date(mf.window.end), "HH:mm");
+			const tz = Qt.formatDateTime(startDate, "t");
+			return qsTr("Moon-free: %1 → %2 %4 (BB %3)").arg(start).arg(end)
+				.arg(mf.score).arg(tz);
+		}
+		color: Kirigami.Theme.highlightColor
+		font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+		opacity: 0.9
+		Layout.fillWidth: true
+		elide: Text.ElideRight
+	}
+
 	// ── Astrospheric-failure warning (red, dismissable) ──────────────────
 	// Shown ONLY for sites inside Astrospheric's coverage whose Astrospheric
 	// fetch failed (no key / rejected key / outage / bad data). The site

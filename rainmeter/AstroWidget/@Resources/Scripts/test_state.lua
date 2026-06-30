@@ -68,6 +68,7 @@ local FIXTURE = [[
         "managed": false,
         "dark_window": { "duration_minutes": 360 },
         "best_window": { "start": "2026-06-04T07:30", "end": "2026-06-04T09:00" },
+        "moonFreeBroadband": { "score": 90, "window": { "start": "2026-06-04T06:00", "end": "2026-06-04T07:15" } },
         "displayFactors": { "cloudPct": 62, "seeing": { "label": "Good" } } } ] },
     { "id": "dome", "label": "Remote Dome", "status": "ok",
       "nights": [ { "label": "Tonight", "recommendation": "BB+NB",
@@ -91,6 +92,8 @@ check('build: site1 bb', rows[1].bb, 48)
 check('build: site1 cloud', rows[1].cloud, 62)
 check('build: site1 not managed', rows[1].managed, false)
 check('build: site1 best non-empty', rows[1].best ~= '', true)
+check('build: site1 moonFree non-empty', rows[1].moonFree ~= '', true)
+check('build: site2 moonFree hidden (no gap)', rows[2].moonFree, '')
 check('build: site2 managed', rows[2].managed, true)
 check('build: site2 best hidden (clear)', rows[2].best, '')
 check('build: site2 aod', rows[2].aod, 0.12)
@@ -105,6 +108,7 @@ check('Count()', Count(), 3)
 check('LineA(1) plain', LineA(1), 'Backyard   NB only')
 check('LineA(2) REMOTE badge', LineA(2), 'Remote Dome   [REMOTE]   BB+NB')
 check('LineB(1) detail', LineB(1):match('^BB 48   NB 71   62%% cloud   Best clear:') ~= nil, true)
+check('LineB(1) has Moon-free', LineB(1):match('Moon%-free:.*%(BB 90%)') ~= nil, true)
 check('LineB(2) clear + fire/AOD', LineB(2), 'BB 88   NB 93   3% cloud   ! 4 fires 60km   AOD 0.12')
 check('LineB(3) shows error', LineB(3), 'API failure')
 check('Color(1) amber (NB only)', Color(1), '235,175,45,255')

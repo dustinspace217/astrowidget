@@ -81,6 +81,22 @@ checkPrecipitation filter (or consciously revert to upstream's 50.0 —
 in which case the wrapper's `_peakPrecipVeto` needs a fabricated-default
 guard instead).
 
+## Moon-window scoring (2026-06-29) — NO vendored delta, by design
+
+The moon-window rework (time-averaged moon burden, moon-free window, Moon-free
+BB, and the calibrated narrowband moon dock) touches NO vendored `lib/` file. It
+lives entirely in astrowidget's own `bin/` code:
+- `bin/moon_window.dart` — per-night geometry + the score-space NB moon dock.
+- `bin/score_location.dart` — wires it into `_scoreOneNight`.
+
+Two tricks kept the engine signature untouched: averaging is applied by passing
+the engine an EFFECTIVE altitude (`effectiveMoonAltitudeDeg(avgSinAlt)`) whose
+`moonBurden` equals the time-average; and the narrowband moon penalty is docked
+in SCORE space (`narrowbandMoonAdjustedSky`), so neither `narrowbandSkyScore` nor
+`scoreLocation` changed. Calibration constants (`moonMaxDeltaMag=3.0` kept;
+`nbMoonCouplingDefault=0.25`) come from the 9,931-sub study
+(`~/Claude/astrowidget-moon-scan/FINDINGS.md`). Nothing to re-apply on re-vendoring.
+
 ## Re-vendoring (if you ever pull a fix from astroplan)
 
 The vendored set is the transitive import closure of `bin/score_location.dart`

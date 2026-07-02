@@ -92,26 +92,7 @@ void main() {
 		});
 	});
 
-	group('narrowbandMoonAdjustedSky (score-space 0.25 dock)', () {
-		test('reproduces the measured 0.25 NB/BB drop ratio at every site', () {
-			// bbSkyNoMoon 100 → bbSkyMoon 20 ⇒ BB drop 80. NB drop must be 0.25×80 = 20.
-			final nb = narrowbandMoonAdjustedSky(100, 100, 20);
-			expect(nb, 80); // 100 − 0.25×80
-			final nbDrop = 100 - nb; // nbSkyNoMoon − result
-			final bbDrop = 100 - 20;
-			expect(nbDrop / bbDrop, closeTo(0.25, 0.001));
-		});
-
-		test('preserves NB ≥ BB (structural invariant)', () {
-			// nbSkyNoMoon ≥ bbSkyNoMoon (NB rejects LP/snow); result must stay ≥ bbSkyMoon.
-			final nb = narrowbandMoonAdjustedSky(100, 78, 44); // Bortle-4-like
-			expect(nb, greaterThanOrEqualTo(44));
-			expect(nb, 92); // 100 − 0.25×34 = 91.5 → 92
-		});
-
-		test('clamps to [0,100]', () {
-			expect(narrowbandMoonAdjustedSky(10, 100, 0), 0); // 10 − 25 → clamp 0
-			expect(narrowbandMoonAdjustedSky(100, 100, 100), 100); // no moon drop
-		});
-	});
+	// The score-space NB moon dock tests were removed 2026-07-01: the dock was superseded
+	// by the retention-v2 composite (retention.dart / retention_test.dart), where the NB
+	// moon response is the calibrated effective flux leakage in one unified sky model.
 }

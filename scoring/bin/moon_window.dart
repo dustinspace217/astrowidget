@@ -10,9 +10,8 @@
 //    burden basis (avgSinAlt) the wrapper feeds to the scorers via `effectiveMoonAltitudeDeg`.
 //  - MOON-FREE WINDOW: the contiguous below-horizon gap is the broadband-usable window to
 //    surface (and to score Moon-free BB over).
-//  - NB MOON CALIBRATION: narrowband loses ~0.25× of broadband's moon depth-hit (measured).
-//    `narrowbandMoonAdjustedSky` docks that in SCORE space — see its doc for why a magnitude
-//    coupling fails (the score curve clamps at 21.5 mag, eating small NB brightenings).
+// (The narrowband moon response lives in retention.dart as of 2026-07-01 — see the note
+// at the bottom of this file.)
 import 'dart:math' as math;
 import 'package:astrowidget_scoring/weather/weather_models.dart';
 
@@ -122,34 +121,7 @@ MoonNightGeometry computeMoonGeometry(
 double effectiveMoonAltitudeDeg(double avgSinAlt) =>
 	math.asin(avgSinAlt.clamp(0.0, 1.0)) * 180 / math.pi;
 
-/// Empirical narrowband MOON coupling (2026-06-29 calibration, 9,931 subs): narrowband loses
-/// 0.25× of broadband's moon depth-hit.
-const double nbMoonCouplingDefault = 0.25;
-
-/// Narrowband sky sub-score with the moon docked in SCORE space.
-///
-/// WHY score-space and not a magnitude coupling inside narrowbandSkyScore: the score curve
-/// clamps at 21.5 mag (any darker sky → 100). Narrowband's sky is ~pristine (21.85), so it
-/// sits AT the clamp; a small magnitude coupling spends its first ~0.35 mag getting from
-/// pristine to 21.5 before any of it registers as a score drop — collapsing the realized
-/// NB/BB drop ratio to ~0.1 (worse at dark sites). Docking in score space avoids the clamp.
-///
-/// `nbSky = nbSkyNoMoon − coupling × (bbSkyNoMoon − bbSkyMoon)`. Reproduces the measured 0.25
-/// drop ratio at every site, and preserves NB ≥ BB: nbSkyNoMoon ≥ bbSkyNoMoon (NB rejects
-/// LP/snow) and coupling·drop ≤ drop, so the result ≥ bbSkyMoon.
-///
-/// Receives: [nbSkyNoMoon] narrowbandSkyScore with the moon OFF (LP/snow only); [bbSkyNoMoon]
-/// locationSkyBrightnessScore with the moon OFF; [bbSkyMoon] the engine's BB sky (with the
-/// averaged moon); [coupling] the calibrated 0.25. Returns: 0–100.
-int narrowbandMoonAdjustedSky(
-	int nbSkyNoMoon,
-	int bbSkyNoMoon,
-	int bbSkyMoon, {
-	double coupling = nbMoonCouplingDefault,
-}) {
-	// ≥ 0 structurally (the moon never brightens the sky, so bbSkyMoon ≤ bbSkyNoMoon), but
-	// clamp defensively so a future divergence between the moon-on / moon-off BB paths can't
-	// INFLATE NB above its no-moon value (QA 2026-06-30, defensive).
-	final bbMoonDrop = (bbSkyNoMoon - bbSkyMoon).clamp(0, 100);
-	return (nbSkyNoMoon - coupling * bbMoonDrop).round().clamp(0, 100);
-}
+// NOTE (2026-07-01): the score-space NB moon dock (narrowbandMoonAdjustedSky, 0.25
+// coupling) that briefly lived here was SUPERSEDED by the retention-v2 composite
+// (retention.dart): the narrowband response now comes from the calibrated effective flux
+// leakage L=0.38 inside one unified sky model. Removed rather than kept dormant.

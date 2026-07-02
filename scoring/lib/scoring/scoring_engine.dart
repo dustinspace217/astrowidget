@@ -584,7 +584,10 @@ const double _fireIntensityFloor = 0.3;
 /// penalty = MAX × proximity × intensity, where proximity = 1 at the site → 0 at
 /// the search radius, and intensity = clamp(maxFrp/REF, FLOOR, 1). Closer +
 /// bigger fires dock more; a distant small detection docks little. Pure function.
-int _fireProximityPenalty(FiresNearby? fires) {
+// PUBLIC (astrowidget vendored delta, 2026-07-01): the retention-v2 wrapper composite
+// reuses this exact tested formula for its transparency retention instead of duplicating
+// it (duplication = drift risk). See VENDORED.md.
+int fireProximityPenalty(FiresNearby? fires) {
 	if (fires == null || fires.count == 0) return 0;
 	final nearest = fires.nearestKm;
 	final radius = fires.radiusKm.toDouble();
@@ -1295,7 +1298,7 @@ LocationScore scoreLocation({
 	// of the intent (CR-1). On the no-AOD path the fire still surfaces via the
 	// advisory below; we simply have no transparency measurement to dock, consistent
 	// with the omit-not-zero rule.
-	final firePenalty = _fireProximityPenalty(firesNearby);
+	final firePenalty = fireProximityPenalty(firesNearby);
 	if (firePenalty > 0 && transparencyFactor != null) {
 		transparencyFactor = (transparencyFactor - firePenalty).clamp(0, 100);
 	}

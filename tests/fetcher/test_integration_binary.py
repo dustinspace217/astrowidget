@@ -194,7 +194,7 @@ def test_real_binary_pipeline_surfaces_astrospheric_and_tags(tmp_path):
 
 	# Fix #5 guard: narrowband carries its method tag. nb-model-v1 (DEF-V2-03) — the NB
 	# verdict is now a real forward model (NB-correct sky sub-score), not a re-weight.
-	assert tonight["narrowband"]["method"] == "nb-model-v1"
+	assert tonight["narrowband"]["method"] == "retention-v2"
 
 	# Fix #4 guard: the +2 night has a real dark window (covered by 4-day fcst),
 	# not a degenerate/empty one.
@@ -380,3 +380,72 @@ def test_subhour_moonfree_gap_is_suppressed():
 	assert tonight["moon"]["freeFraction"] < 0.05  # moon up ~all night
 	assert tonight["moonFreeBroadband"] is None
 	assert tonight["moon"]["freeWindow"] is None
+
+
+def _run_night(now_utc, cloud_pct):
+	"""One scored night at lat 45, Bortle 2, uniform cloud_pct (real moon ephemeris)."""
+	start = datetime.fromisoformat(now_utc.replace("Z", "+00:00"))
+	hourly = _clear_hourly(start)
+	for h in hourly:
+		h["cloud_cover"] = cloud_pct
+		h["cloud_cover_high"] = cloud_pct
+	payload = {"now_utc": now_utc, "sites": [{"id": "s", "label": "S", "lat": 45.0,
+			   "lon": -120.0, "bortle": 2, "hourly": hourly, "firesNearby": None}]}
+	out = subprocess.run([str(fx.SCORING_BINARY)], input=json.dumps(payload).encode(),
+						 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
+	return json.loads(out.stdout)["sites"][0]["nights"][0]
+
+
+# Real lunar anchors for the four-corner test: 2026-06-29 is a FULL moon (up all night);
+# 2026-07-14 is a NEW moon (down all night). Deterministic ephemeris, and each test
+# verifies its anchor via the emitted moon block so a wrong date fails loudly.
+_FULL = "2026-06-29T20:00:00Z"
+_NEW = "2026-07-14T20:00:00Z"
+
+
+def test_four_corner_ordering_through_real_binary():
+	"""Dustin's retention-v2 acceptance test (spec 2026-07-01): effects COMPOUND.
+	moonless-cloudless best > each single-problem night > fullmoon-cloudy worst."""
+	best = _run_night(_NEW, 3)
+	moony = _run_night(_FULL, 3)
+	cloudy = _run_night(_NEW, 55)
+	worst = _run_night(_FULL, 55)
+	# guard the ephemeris anchors (loud, not silent):
+	assert best["moon"]["illumination_pct"] < 15
+	assert moony["moon"]["illumination_pct"] > 90
+
+	def bb(n):
+		return n["broadband"]["score"]
+	assert bb(best) > bb(moony), "full moon must crunch a clear night"
+	assert bb(best) > bb(cloudy), "cloud must crunch a moonless night"
+	assert bb(moony) > bb(worst), "cloud must compound ON TOP of the moon"
+	assert bb(cloudy) > bb(worst), "the moon must compound ON TOP of cloud"
+
+
+def test_scoring_audit_block_and_product_identity():
+	"""Auditability (Dustin 2026-07-01): the scoring block carries every input + retention,
+	and score == round(100 × Π retentions) holds for both bands (±1 for the 3-decimal
+	rounding of the emitted retentions)."""
+	night = _run_night(_FULL, 3)
+	sc = night["scoring"]
+	assert sc["model"] == "retention-v2"
+	for band in ("broadband", "narrowband"):
+		rets = sc[band]["retentions"]
+		prod = 1.0
+		for key in ("timeCloud", "sky", "transparency", "seeing"):
+			assert 0.0 <= rets[key] <= 1.0
+			prod *= rets[key]
+		assert abs(night[band]["score"] - round(100 * prod)) <= 1
+	inputs = sc["inputs"]
+	assert inputs["moonAvgBurden"] > 0.2  # full-moon night: real burden, visible for audit
+	assert inputs["bortle"] == 2
+	assert "cloudFactor" in inputs and "stabilityFactor" in inputs
+
+
+def test_overcast_still_craters_no_green_regression():
+	"""The no-green-under-overcast incident guard, retention-v2 form: near-total overcast
+	→ the time retention floors the composite regardless of a perfect moonless sky."""
+	night = _run_night(_NEW, 97)
+	assert night["broadband"]["score"] <= 10
+	assert night["narrowband"]["score"] <= 10
+	assert night["recommendation"] == "Neither"

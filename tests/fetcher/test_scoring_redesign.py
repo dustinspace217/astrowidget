@@ -434,7 +434,7 @@ def test_schema_factor_set_changed():
 	assert "skyBrightness" in factors
 	assert "best_window" in night
 	assert night["managed"] is False
-	assert night["narrowband"]["method"] == "nb-model-v1"
+	assert night["narrowband"]["method"] == "retention-v2"
 
 
 @pytestmark_binary
@@ -548,7 +548,7 @@ def test_narrowband_model_tag_and_invariant():
 	needs gone)."""
 	night = _run_binary(datetime(2026, 12, 23, 6, tzinfo=timezone.utc),
 						cloud=5.0, managed=False, bortle=5)
-	assert night["narrowband"]["method"] == "nb-model-v1"
+	assert night["narrowband"]["method"] == "retention-v2"
 	assert night["narrowband"]["score"] >= night["broadband"]["score"]
 
 

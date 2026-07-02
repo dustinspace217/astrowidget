@@ -34,35 +34,48 @@ import 'dart:io';
 import 'package:astrowidget_scoring/astro/moon_geometry.dart';
 import 'package:astrowidget_scoring/astro/visibility.dart';
 import 'package:astrowidget_scoring/scoring/scoring_engine.dart';
-import 'package:astrowidget_scoring/scoring/sky_brightness.dart'; // locationSkyBrightnessScore (NB moon dock baseline)
 import 'package:astrowidget_scoring/scoring/veto_evaluator.dart';
 import 'package:astrowidget_scoring/weather/weather_models.dart';
-import 'narrowband.dart'; // astrowidget's own NB sky model (DEF-V2-03)
-import 'moon_window.dart'; // averaged burden + moon-free window + NB moon dock (2026-06-29)
+import 'moon_window.dart'; // averaged burden + moon-free window (2026-06-29)
+import 'retention.dart'; // retention-v2 composite — both bands (2026-07-01)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Narrowband composite
+// Composite: retention-v2
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Narrowband is now a REAL forward model (nb-model-v1, spec 2026-06-20), not the old
-// heuristic re-weight. Only SKY BRIGHTNESS is filter-dependent — a narrowband filter
-// rejects ~99% of the moon/LP/twilight continuum, so its sky background is far darker
-// than broadband (this is why Ha works under a gibbous moon). Cloud, stability, and
-// transparency block emission lines just like broadband, so those sub-scores carry over
-// unchanged. So the NB verdict is: swap the engine's broadband skyBrightness sub-score
-// for narrowbandSkyScore() (narrowband.dart), then re-composite with the SAME location
-// weights the engine uses. Because narrowbandSkyScore ≥ the broadband sky score for every
-// input, NB ≥ BB falls out of the model — no artificial floor.
-//
-// These mirror scoreLocation's location weights (scoring_engine.dart) — keep in sync.
-// When this refinement back-ports to astroplan they become the engine's NB-mode weights.
-const Map<String, double> _nbCompositeWeights = <String, double>{
-	'cloud': 1.0,
-	'stability': 0.6,
-	'skyBrightness': 0.8,
-	'transparency': 0.9,
-};
-const String _nbMethod = 'nb-model-v1';
+// BOTH bands' composites now come from the retention-v2 model (retention.dart; spec
+// 2026-07-01-scoring-v2-retention-composite.md): score = 100 × Π(retention_i), replacing
+// BOTH the engine's weighted-mean+cloud-gate broadband score AND the wrapper's old
+// nb-model-v1 re-weight. WHY: a weighted mean lets three good factors dilute one bad one
+// (a 98% moon read BB 85 — a measured ~30% depth loss shown as ~6% of score), and Dustin's
+// four-corner requirement (moonless-cloudless best > single-problem > fullmoon-cloudy
+// worst) is a compounding property only a product delivers. The engine still computes
+// factors (display), vetoes, and windows; the wrapper owns the score.
+const String _nbMethod = 'retention-v2';
+
+/// Window-mean aerosol optical depth for the retention composite's transparency input.
+///
+/// Receives: [airQuality] hourly rows (nullable — many sites have no air-quality feed);
+/// the window bounds. Returns: the mean of the non-null AOD readings inside the window,
+/// or null when there are none — null flows to transparencyRetention as the multiplicative
+/// identity (omit-not-zero: absence of data must never read as haze).
+double? _aodWindowMean(
+	List<AirQuality>? airQuality,
+	DateTime start,
+	DateTime end,
+) {
+	if (airQuality == null || airQuality.isEmpty) return null;
+	var total = 0.0;
+	var count = 0;
+	for (final aq in airQuality) {
+		if (aq.time.isBefore(start) || aq.time.isAfter(end)) continue;
+		final aod = aq.aerosolOpticalDepth;
+		if (aod == null || aod.isNaN) continue;
+		total += aod;
+		count++;
+	}
+	return count == 0 ? null : total / count;
+}
 
 /// Equipment-protection precipitation veto: fires when the PEAK (maximum)
 /// precipitation probability across the exposure (sunset→sunrise) window
@@ -278,7 +291,9 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 	final siteBortle = (site['bortle'] as num?)?.toInt();
 	// Optional per-site narrowband leakage override (filter-bandwidth tuning); the
 	// fetcher passes it from config.toml when set. Absent → the physics default (0.05).
-	final nbLeakage = (site['nb_leakage'] as num?)?.toDouble() ?? nbLeakageDefault;
+	// nb_leakage: the effective NB flux leakage in the retention model (retention.dart).
+	// Default is the CALIBRATED 0.38, not the theoretical 3nm 0.05 — see the spec.
+	final nbLeakage = (site['nb_leakage'] as num?)?.toDouble() ?? nbEffectiveLeakage;
 	final managed = site['managed'] as bool? ?? false;
 
 	// Per-site veto thresholds with sensible defaults.
@@ -418,6 +433,7 @@ Map<String, dynamic> _scoreOneNight({
 			// so consumers never hit an undefined best_window/managed.
 			'best_window': null,
 			'moonFreeBroadband': null,
+			'scoring': null, // no window to score — audit block absent, like the rest
 			'managed': managed,
 			'recommendation': 'Neither',
 			'reasons': ['No astronomical darkness on this date.'],
@@ -532,80 +548,51 @@ Map<String, dynamic> _scoreOneNight({
 		? const <Map<String, String>>[]
 		: <Map<String, String>>[{'name': firedVeto.vetoName, 'reason': firedVeto.reason}];
 
-	// Narrowband — real forward model (nb-model-v1, spec 2026-06-20). Swap the engine's
-	// broadband skyBrightness sub-score for an NB-correct one (narrowbandSkyScore — the
-	// filter rejects ~all of the moon/LP continuum), then composite with the SAME location
-	// weights the engine uses. Present-factors-only: an absent transparency (no AOD) is
-	// skipped, never read as 0 — a 0 would resurrect the BB>NB inversion the Phase-1
-	// redesign fixed. Because narrowbandSkyScore ≥ the broadband sky score for every input,
-	// NB ≥ BB falls out (no artificial floor needed).
-	// Mirror the BB sky model's snow input exactly (scoring_engine.dart): the window-mean
-	// ground-snow depth. Snow reflects moon+LP upward — continuum the NB filter also
-	// rejects — so the NB sky must apply the SAME brightening to stay consistent with BB
-	// (and preserve the leakage=1 ≡ BB identity). Omitting it silently overscored snowy
-	// nights (QA workflow 2026-06-20).
+	// Window-mean ground-snow depth: feeds the snow amplification in the sky retention
+	// (snow reflects moon+LP upward; same input the engine's display sky factor uses).
 	final meanSnowDepth = windowHours.isEmpty
 		? 0.0
 		: windowHours.map((h) => h.snowDepth).reduce((a, b) => a + b) /
 			windowHours.length;
-	// NB sky via the SCORE-SPACE moon dock (calibration 2026-06-29, 9,931 subs): narrowband
-	// loses 0.25× of broadband's moon hit. Get the LP/snow-only NB baseline (moon OFF) and
-	// the BB sky with vs without the (averaged) moon, then dock the moon in score space — a
-	// magnitude coupling is eaten by the score curve's 21.5-mag clamp (see moon_window.dart).
-	final nbSkyNoMoon = narrowbandSkyScore(
-		bortle: siteBortle,
-		moonIlluminationPercent: 0, // moon OFF → LP/snow continuum only
-		moonAltitudeDeg: -90,
-		snowDepthM: meanSnowDepth,
-		leakage: nbLeakage,
-	);
-	final bbSkyNoMoon = locationSkyBrightnessScore(
-		bortle: siteBortle,
-		moonIlluminationPercent: 0,
-		moonAltitudeDeg: -90,
-		snowDepthM: meanSnowDepth,
-	);
-	// BB sky WITH the averaged moon (the engine just computed it). Fallback to the no-moon
-	// value on the overcast early-return path, where the engine omits skyBrightness.
-	final bbSkyMoon = loc.factorScores['skyBrightness'] ?? bbSkyNoMoon;
-	final nbSky = narrowbandMoonAdjustedSky(nbSkyNoMoon, bbSkyNoMoon, bbSkyMoon);
-	final nbScores = <String, int>{
-		'cloud': loc.factorScores['cloud'] ?? 0,
-		'stability': loc.factorScores['stability'] ?? 0,
-		'skyBrightness': nbSky,
-	};
-	if (loc.factorScores.containsKey('transparency')) {
-		nbScores['transparency'] = loc.factorScores['transparency']!;
-	}
-	var nbWeightedSum = 0.0;
-	var nbTotalW = 0.0;
-	nbScores.forEach((key, score) {
-		final w = _nbCompositeWeights[key]!;
-		nbWeightedSum += w * score;
-		nbTotalW += w;
-	});
-	final nbRaw = (nbWeightedSum / nbTotalW).round().clamp(0, 100);
-	// Cloud gate: opaque cloud blocks emission lines too, so narrowband can't beat the
-	// cloud sub-score either (the same cap the engine applies to broadband).
+
+	// ── retention-v2 composite for BOTH bands (retention.dart; spec 2026-07-01) ──
+	// Inputs, each emitted in the audit block below so the score is reconstructable:
+	//  - cloudFactor/stabilityFactor: the engine's existing 0-100 factors over the window
+	//    (cloud = usable-TIME proxy; calibration showed cloud deletes minutes, not depth).
+	//  - avgBurden: illumination × mean(sin alt) — the time-AVERAGED moon geometry.
+	//  - aodMean: window-mean AOD (null = no data → multiplicative identity, omit-not-zero).
+	//  - firePenalty: the engine's FIRMS dock (0-25). In the multiplicative model it can
+	//    never raise a score, so it now applies even without AOD data — an improvement on
+	//    the v1 rule (the original smoke incident WAS a fire with under-resolved AOD).
+	final avgBurden = (moonIllum / 100.0) * moonGeom.avgSinAlt;
+	final aodMean = _aodWindowMean(
+		forecast.airQuality, darkWindow.start!, darkWindow.end!);
+	final firePenalty = fireProximityPenalty(firesNearby);
 	final cloudFactor = loc.factorScores['cloud'] ?? 0;
-	final nbScore = nbRaw < cloudFactor ? nbRaw : cloudFactor;
+	final stabilityFactor = loc.factorScores['stability'] ?? 0;
+	final night = compositeRetentions(
+		cloudFactor: cloudFactor,
+		avgBurden: avgBurden,
+		bortle: siteBortle,
+		snowDepthM: meanSnowDepth,
+		aodMean: aodMean,
+		firePenalty: firePenalty,
+		stabilityFactor: stabilityFactor,
+		nbLeakage: nbLeakage,
+	);
+	final bbScore = night.broadband.score;
+	final bbVerdict = Verdict.fromScore(bbScore);
+	final nbScore = night.narrowband.score;
 	final nbVerdict = Verdict.fromScore(nbScore);
 
-	// Compute recommendation per spec §8.
-	// Green = genuinely GOOD (spec §5b): require ≥ good. A marginal (40–59) night is
-	// NOT a green pass. The old code accepted marginal — which, together with the
-	// removed always-100 darkness factor inflating the composite, is how an overcast
-	// or moonlit night used to read green. Dropping marginal is half the incident fix
-	// (removing the darkness inflation is the other half).
+	// Recommendation: green = genuinely GOOD (≥ good; marginal is not a green pass —
+	// spec §5b of the Phase-1 redesign, unchanged). NB ≥ BB is structural in v2 (the NB
+	// sky retention sees only L<1 of the excess flux; every other retention is shared),
+	// so bbPass ⇒ nbPass and the ladder below is exact.
 	final bbPass = vetoes.isEmpty &&
-		(loc.verdict == Verdict.excellent || loc.verdict == Verdict.good);
+		(bbVerdict == Verdict.excellent || bbVerdict == Verdict.good);
 	final nbPass = vetoes.isEmpty &&
 		(nbVerdict == Verdict.excellent || nbVerdict == Verdict.good);
-	// NB is physically never WORSE than BB, and nb-model-v1 makes that STRUCTURAL: the
-	// NB composite swaps in an NB-correct sky sub-score (≥ the broadband one) under the
-	// same weights + cloud gate, so nbScore ≥ bbScore for every input. So bbPass ⇒ nbPass
-	// already — the `bbPass ? BB+NB` clause is exact, not a floor patching imperfect
-	// scoring (the old v2 re-weight could score NB a few points below BB; this replaces it).
 	final recommendation = bbPass
 		? 'BB+NB'
 		: nbPass
@@ -622,6 +609,9 @@ Map<String, dynamic> _scoreOneNight({
 	final moonFreeWindow = moonGeom.moonFreeWindow;
 	Map<String, dynamic>? moonFreeBroadband;
 	if (moonFreeWindow != null) {
+		// Second engine pass slices the FACTORS (cloud/stability) to the gap window;
+		// the v2 composite then scores the gap with the moon OFF (avgBurden 0) and the
+		// gap's own AOD mean — Dustin's slice-to-window decision, retention-v2 form.
 		final mf = scoreLocation(
 			forecast: forecast,
 			darkWindow: darkWindow,
@@ -631,9 +621,20 @@ Map<String, dynamic> _scoreOneNight({
 			moonAltitude: -90.0, // moon below horizon → zero burden over the gap
 			firesNearby: firesNearby,
 		);
+		final mfRet = compositeRetentions(
+			cloudFactor: mf.factorScores['cloud'] ?? 0,
+			avgBurden: 0.0, // the gap is moon-free by construction
+			bortle: siteBortle,
+			snowDepthM: meanSnowDepth,
+			aodMean: _aodWindowMean(
+				forecast.airQuality, moonFreeWindow.start, moonFreeWindow.end),
+			firePenalty: firePenalty,
+			stabilityFactor: mf.factorScores['stability'] ?? 0,
+			nbLeakage: nbLeakage,
+		);
 		moonFreeBroadband = {
-			'score': mf.score,
-			'verdict': mf.verdict.name,
+			'score': mfRet.broadband.score,
+			'verdict': Verdict.fromScore(mfRet.broadband.score).name,
 			'window': {
 				'start': moonFreeWindow.start.toIso8601String(),
 				'end': moonFreeWindow.end.toIso8601String(),
@@ -660,16 +661,35 @@ Map<String, dynamic> _scoreOneNight({
 				},
 		},
 		'broadband': {
-			'score': loc.score,
-			'verdict': loc.verdict.name,
+			'score': bbScore,
+			'verdict': bbVerdict.name,
 			'vetoes': vetoes,
-			'factors': loc.factorScores,
+			'factors': loc.factorScores, // engine sub-scores, kept for the UI factor rows
 		},
 		'narrowband': {
 			'score': nbScore,
 			'verdict': nbVerdict.name,
 			'vetoes': vetoes, // same hard-stop vetoes apply
-			'method': _nbMethod, // 'nb-model-v1' — real forward model, first-principles-uncalibrated
+			'method': _nbMethod, // 'retention-v2' — calibrated compounding composite
+		},
+		// AUDIT BLOCK (Dustin's requirement, 2026-07-01): every scoring input and every
+		// retention multiplier, so score == round(100 × Π retentions) is checkable by
+		// inspection (and IS checked by the integration tests).
+		'scoring': {
+			'model': 'retention-v2',
+			'broadband': night.broadband.toJson(),
+			'narrowband': night.narrowband.toJson(),
+			'inputs': {
+				'moonIlluminationPct': moonIllum,
+				'moonAvgBurden': (avgBurden * 1000).round() / 1000,
+				'moonPeakAltDeg': (maxMoonAlt * 10).round() / 10,
+				'bortle': siteBortle,
+				'aodMean': aodMean == null ? null : (aodMean * 1000).round() / 1000,
+				'firePenalty': firePenalty,
+				'cloudFactor': cloudFactor,
+				'stabilityFactor': stabilityFactor,
+				'snowDepthM': (meanSnowDepth * 1000).round() / 1000,
+			},
 		},
 		// The broadband score you could get by shooting LRGB in the moon-free gap (null on
 		// no-moon / moon-up-all-night). Display-only; does NOT drive the headline pill (which

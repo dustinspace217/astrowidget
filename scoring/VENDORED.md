@@ -96,6 +96,18 @@ in SCORE space (`narrowbandMoonAdjustedSky`), so neither `narrowbandSkyScore` no
 `scoreLocation` changed. Calibration constants (`moonMaxDeltaMag=3.0` kept;
 `nbMoonCouplingDefault=0.25`) come from the 9,931-sub study
 (`~/Claude/astrowidget-moon-scan/FINDINGS.md`). Nothing to re-apply on re-vendoring.
+(The NB moon dock was later SUPERSEDED by retention-v2 — next section.)
+
+## Retention-v2 composite (2026-07-01) — ONE vendored delta
+
+The retention-v2 composite (`bin/retention.dart` + `bin/score_location.dart` wiring;
+spec 2026-07-01-scoring-v2-retention-composite.md) lives in astrowidget's own `bin/`
+code. The engine's weighted-mean composite and cloud gate are no longer used for the
+emitted scores (the engine still provides factor sub-scores, vetoes, and windows).
+ONE vendored delta to re-apply on re-vendoring:
+- `lib/scoring/scoring_engine.dart`: `_fireProximityPenalty` → `fireProximityPenalty`
+  (exported, with a comment) so the wrapper's transparency retention reuses the tested
+  FIRMS formula instead of duplicating it.
 
 ## Re-vendoring (if you ever pull a fix from astroplan)
 

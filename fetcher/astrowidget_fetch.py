@@ -2008,7 +2008,7 @@ def main() -> int:
 		#   bortle  → light-pollution class 1–9, or None (Dart default baseline)
 		managed = site_cfg.get("managed", False)
 		bortle = site_cfg.get("bortle")  # None when not configured
-		nb_leakage = site_cfg.get("nb_leakage")  # None → Dart uses its 0.05 default
+		nb_leakage = site_cfg.get("nb_leakage")  # None → Dart uses the calibrated 0.38 (retention-v2)
 		# Defensive: thresholds section may be missing or non-dict.
 		thresholds_section = cfg.get("thresholds")
 		if not isinstance(thresholds_section, dict):

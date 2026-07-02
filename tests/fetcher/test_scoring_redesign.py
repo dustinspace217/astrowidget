@@ -584,10 +584,10 @@ def test_nb_leakage_override_is_wired_end_to_end():
 
 @pytestmark_binary
 def test_narrowband_absent_transparency_skips_not_zeros():
-	"""Absent transparency is SKIPPED in the NB composite, not read as 0 (a 0 at weight
-	0.9 would TANK NB). NB with transparency absent must stay CLOSE to NB with transparency
-	present-and-good — both decline to penalise a factor that isn't actually bad. A
-	zeroed-absent would diverge by ~20+; skip keeps them within a few points."""
+	"""Absent AOD is the multiplicative IDENTITY in retention-v2 (transparency retention
+	1.0), never read as 0 haze. So NB with transparency absent must stay CLOSE to NB with
+	transparency present-and-good — both decline to penalise a factor that isn't actually
+	bad. A zeroed-absent would crater the product; identity keeps them within a few points."""
 	now = datetime(2026, 12, 23, 6, tzinfo=timezone.utc)
 	absent = _run_binary(now, cloud=10.0, managed=False, bortle=6, with_aod=False)
 	present = _run_binary(now, cloud=10.0, managed=False, bortle=6, with_aod=True, aod=0.02)
@@ -597,19 +597,12 @@ def test_narrowband_absent_transparency_skips_not_zeros():
 
 @pytestmark_binary
 def test_nb_leakage_one_reproduces_broadband_at_binary_layer():
-	"""Composite weight-table PARITY guard (QA-convergent, both reviewers). At leakage=1 the
-	LP/snow continuum is fully transmitted, so on a MOONLESS night the NB sky sub-score equals
-	the broadband one, and the two SEPARATELY-coded composites — NB's in the wrapper
-	(_nbCompositeWeights), BB's in the engine — must produce the IDENTICAL score. If
-	_nbCompositeWeights or the cloud gate ever drifts from the engine's location weighting,
-	this fails where every unit test still passes.
-
-	Post-calibration (2026-06-29): leakage governs LP/snow ONLY; the moon is docked separately
-	in score space at 0.25, so this parity now requires a MOONLESS night (burden 0 → moon dock
-	0) to isolate the composite weights from the moon term — on a moonlit night NB > BB even at
-	leakage=1, by design."""
-	# 2026-12-09 is a NEW moon (0% illum) → moon burden 0 → the score-space moon dock is 0, so
-	# leakage=1 makes NB sky == BB sky and isolates the composite-weight parity.
+	"""NB==BB parity guard, retention-v2 form: at leakage=1 the narrowband path sees the
+	FULL excess sky flux (Δmag_NB == Δmag_BB), and every other retention is shared, so the
+	two band composites must produce the IDENTICAL score. Guards the per-band plumbing —
+	any NB/BB divergence outside the leakage term fails here. (retention-v2 makes this
+	parity hold on ANY night, moonlit or not; the moonless date is continuity, not a
+	requirement.)"""
 	night = _run_binary(datetime(2026, 12, 9, 6, tzinfo=timezone.utc),
 						cloud=5.0, managed=False, bortle=5, nb_leakage=1.0)
 	assert night["broadband"]["score"] > 30   # non-degenerate (not a 0 == 0 pass)

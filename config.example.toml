@@ -86,6 +86,14 @@ timezone = "UTC"
 # primary = true            # full column (this is the default)
 # managed = false           # HOME mode (default): protect an uncovered scope
 # bortle  = 5               # your Bortle class; omit to use the default baseline
+# nb_leakage = 0.38         # ADVANCED: effective narrowband flux leakage in the
+#                           # retention-v2 scoring model — the fraction of excess sky
+#                           # flux (moon + light pollution) your narrowband stack sees.
+#                           # The 0.38 default was CALIBRATED from a 9,931-sub library
+#                           # (real-world filters/halos), NOT the theoretical bandwidth
+#                           # ratio of a 3nm filter (~0.05). Setting a theoretical value
+#                           # will overrate narrowband under moonlight; leave unset
+#                           # unless you've measured your own stack.
 
 # A hosted / REMOTE observatory — weatherproof dome, so set managed = true
 # (Astrospheric is used automatically if it's in North America):

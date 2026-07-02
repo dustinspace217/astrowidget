@@ -1,3 +1,4 @@
+import 'package:astrowidget_scoring/weather/weather_models.dart';
 import 'package:test/test.dart';
 import '../bin/retention.dart';
 
@@ -55,10 +56,17 @@ void main() {
 			expect(_score(band: 'BB', cloudFactor: 3, bortle: 1, stabilityFactor: 100),
 				lessThanOrEqualTo(5));
 		});
-		test('retention floors hold at absurd inputs (no negative/NaN)', () {
+		test('retention floors hold at absurd inputs (worst case is floored, non-zero)', () {
+			// Worst realistic mud: overcast + full moon + Bortle 9 + heavy smoke + max fire
+			// + dead seeing. Every retention floors (0.02 × 0.05 × 0.15·0.75 × 0.85) — the
+			// product stays ORDERED and positive-definite, so no single effect can blind
+			// the composite to the others (a hard 0 would).
 			final s = _score(band: 'BB', cloudFactor: 0, avgBurden: 1.0, bortle: 9,
 				aodMean: 3.0, firePenalty: 25, stabilityFactor: 0);
-			expect(s, greaterThanOrEqualTo(0));
+			expect(s, equals(0)); // 100 × ~0.0001 rounds to 0 — but via floors, not a hard 0
+			// The floors themselves are live: each term alone leaves the others visible.
+			expect(timeRetention(0), equals(0.02));
+			expect(seeingRetention(0), equals(0.85));
 		});
 	});
 
@@ -125,11 +133,25 @@ void main() {
 		test('no AOD data → identity (omit-not-zero, multiplicative form)', () {
 			expect(transparencyRetention(null, 0), equals(1.0));
 		});
-		test('fire dock multiplies; advisory-only when no AOD is unaffected here', () {
+		test('fire dock multiplies WITH AOD present', () {
 			expect(transparencyRetention(0.10, 20), closeTo(0.99 * 0.80, 0.001));
 		});
-		test('floor at 0.50 for extreme smoke', () {
-			expect(transparencyRetention(2.0, 0), greaterThanOrEqualTo(0.50));
+		test('fire dock applies EVEN WITHOUT AOD (the v2 spec deviation — QA lock)', () {
+			// v1 refused to dock without AOD (a fabricated factor could RAISE the weighted
+			// mean); in a product the dock can only lower, and the original smoke incident
+			// was a fire with under-resolved AOD. This locks the deliberate new behavior.
+			expect(transparencyRetention(null, 20), closeTo(0.80, 0.001));
+		});
+		test('NaN AOD is guarded — never silently reads as clear-with-certainty', () {
+			expect(transparencyRetention(double.nan, 0), equals(1.0)); // identity, no crash
+			expect(transparencyRetention(double.nan, 20), closeTo(0.80, 0.001)); // fire holds
+		});
+		test('heavy smoke slopes to the 0.15 floor (dontBother, not marginal)', () {
+			// The measured curve ends at (0.60, 0.65); beyond it the slope continues down
+			// so wildfire-grade AOD (≥ ~1.4) floors at 0.15 — a clear heavy-smoke night
+			// must not read "marginal" (QA 2026-07-01).
+			expect(transparencyRetention(2.0, 0), closeTo(0.15, 0.001));
+			expect(transparencyRetention(0.8, 0), lessThan(0.65)); // slope keeps hurting
 		});
 	});
 
@@ -142,6 +164,51 @@ void main() {
 				final p = band.timeCloud * band.sky * band.transparency * band.seeing;
 				expect(band.score, equals((100 * p).round().clamp(0, 100)));
 			}
+		});
+	});
+
+	group('skyDeltaMag emission (audit correctness — QA 2026-07-01)', () {
+		test('NB sees less brightening than BB under moon; both non-negative', () {
+			final r = compositeRetentions(cloudFactor: 95, avgBurden: 0.5, bortle: 3,
+				snowDepthM: 0, aodMean: null, firePenalty: 0, stabilityFactor: 70,
+				nbLeakage: nbEffectiveLeakage);
+			expect(r.broadband.skyDeltaMag, greaterThan(0));
+			expect(r.narrowband.skyDeltaMag, greaterThan(0));
+			expect(r.narrowband.skyDeltaMag, lessThan(r.broadband.skyDeltaMag));
+		});
+		test('leakage=1 → identical Δmag both bands (a band-swap would fail here)', () {
+			final r = compositeRetentions(cloudFactor: 95, avgBurden: 0.5, bortle: 3,
+				snowDepthM: 0, aodMean: null, firePenalty: 0, stabilityFactor: 70,
+				nbLeakage: 1.0);
+			expect(r.narrowband.skyDeltaMag, closeTo(r.broadband.skyDeltaMag, 1e-9));
+		});
+	});
+
+	group('aodWindowMean (transparency input prep)', () {
+		AirQuality aq(int hour, double? aod) => AirQuality(
+			time: DateTime.utc(2026, 1, 1, hour), pm2_5: 0, pm10: 0,
+			aerosolOpticalDepth: aod, usAqi: 0, usAqiPm2_5: 0, usAqiPm10: 0);
+		final start = DateTime.utc(2026, 1, 1, 2);
+		final end = DateTime.utc(2026, 1, 1, 8);
+
+		test('null / empty list → null (no feed)', () {
+			expect(aodWindowMean(null, start, end), isNull);
+			expect(aodWindowMean(const [], start, end), isNull);
+		});
+		test('feed present but every in-window AOD null → null (degraded feed)', () {
+			expect(aodWindowMean([aq(3, null), aq(4, null)], start, end), isNull);
+		});
+		test('NaN readings are skipped, not averaged (a NaN mean would silently poison)', () {
+			expect(aodWindowMean([aq(3, double.nan), aq(4, 0.2)], start, end),
+				closeTo(0.2, 1e-9));
+		});
+		test('rows outside the window are excluded', () {
+			expect(aodWindowMean([aq(1, 5.0), aq(3, 0.1), aq(9, 5.0)], start, end),
+				closeTo(0.1, 1e-9));
+		});
+		test('plain mean over usable in-window rows', () {
+			expect(aodWindowMean([aq(3, 0.1), aq(4, 0.3)], start, end),
+				closeTo(0.2, 1e-9));
 		});
 	});
 

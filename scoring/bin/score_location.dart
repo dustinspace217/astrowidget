@@ -17,17 +17,14 @@
 // pipes JSON through it.  Calibration improvements in scoring_engine.dart
 // automatically reach any downstream consumer after a rebuild.
 //
-// Why the BB/NB recommendation logic lives here, not in scoring_engine.dart:
-// scoreLocation() doesn't currently accept an ImagingMode parameter (that
-// exists only on scoreTarget()).  Rather than modify the public surface of
-// scoreLocation() — which would be a breaking change for astroplan — this
-// wrapper computes the broadband score from the engine's defaults, then
-// rebuilds a narrowband score by re-weighting the engine-returned factor
-// scores with a much-reduced sky-brightness weight (narrowband rejects
-// moonlight + light pollution).  This is a site-level BB/NB approximation,
-// not the per-target distinction scoreTarget() makes.
-// See ~/Claude/astrowidget/docs/superpowers/specs/2026-05-28-astrowidget-design.md
-// §6.2 for the spec and §8 for the recommendation algorithm.
+// Why the BB/NB scoring lives here, not in scoring_engine.dart: the engine is a
+// VENDORED copy of astroplan's (see ../VENDORED.md) whose public surface we do not
+// change. As of retention-v2 (spec 2026-07-01) this wrapper owns BOTH bands' composites
+// — a compounding product of calibrated retentions computed in retention.dart — using
+// the engine only for factor sub-scores (display), vetoes, and windows. The per-band
+// difference is the narrowband sky retention (NB sees only L≈0.38 of the excess sky
+// flux). This is a site-level BB/NB distinction, not scoreTarget()'s per-target one.
+// See docs/superpowers/specs/2026-07-01-scoring-v2-retention-composite.md.
 
 import 'dart:convert';
 import 'dart:io';
@@ -52,30 +49,6 @@ import 'retention.dart'; // retention-v2 composite — both bands (2026-07-01)
 // worst) is a compounding property only a product delivers. The engine still computes
 // factors (display), vetoes, and windows; the wrapper owns the score.
 const String _nbMethod = 'retention-v2';
-
-/// Window-mean aerosol optical depth for the retention composite's transparency input.
-///
-/// Receives: [airQuality] hourly rows (nullable — many sites have no air-quality feed);
-/// the window bounds. Returns: the mean of the non-null AOD readings inside the window,
-/// or null when there are none — null flows to transparencyRetention as the multiplicative
-/// identity (omit-not-zero: absence of data must never read as haze).
-double? _aodWindowMean(
-	List<AirQuality>? airQuality,
-	DateTime start,
-	DateTime end,
-) {
-	if (airQuality == null || airQuality.isEmpty) return null;
-	var total = 0.0;
-	var count = 0;
-	for (final aq in airQuality) {
-		if (aq.time.isBefore(start) || aq.time.isAfter(end)) continue;
-		final aod = aq.aerosolOpticalDepth;
-		if (aod == null || aod.isNaN) continue;
-		total += aod;
-		count++;
-	}
-	return count == 0 ? null : total / count;
-}
 
 /// Equipment-protection precipitation veto: fires when the PEAK (maximum)
 /// precipitation probability across the exposure (sunset→sunrise) window
@@ -259,7 +232,8 @@ Future<void> main(List<String> args) async {
 	final out = <String, dynamic>{
 		// Schema 2 (2026-06-03, Phase-1 scoring redesign): factors map is now
 		// {cloud, stability, skyBrightness, transparency?} (darkness/moon removed);
-		// each night gains best_window + managed; NB method is nb-model-v1 (DEF-V2-03).
+		// each night gains best_window + managed. As of retention-v2 (2026-07-01) each
+		// night also carries a nullable 'scoring' audit block; NB method is retention-v2.
 		'schema_version': 2,
 		'computed_at': DateTime.now().toUtc().toIso8601String(),
 		'sites': results,
@@ -289,10 +263,13 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 	//   managed — HOME (false) vs REMOTE/dome (true). A REMOTE dome is weatherproof,
 	//             so it skips the precip EQUIPMENT veto (applied in _scoreOneNight).
 	final siteBortle = (site['bortle'] as num?)?.toInt();
-	// Optional per-site narrowband leakage override (filter-bandwidth tuning); the
-	// fetcher passes it from config.toml when set. Absent → the physics default (0.05).
-	// nb_leakage: the effective NB flux leakage in the retention model (retention.dart).
-	// Default is the CALIBRATED 0.38, not the theoretical 3nm 0.05 — see the spec.
+	// Optional per-site nb_leakage override. SEMANTICS CHANGED in retention-v2
+	// (2026-07-01): this is now the EFFECTIVE narrowband flux leakage in the retention
+	// model (retention.dart) — the fraction of excess sky flux the NB path sees, default
+	// the CALIBRATED 0.38 — NOT the old nb-model-v1 filter-bandwidth transmission whose
+	// default was the theoretical 3nm 0.05. A v1-era value like 0.05 would now inflate
+	// every NB score ~as if the filter were 7.6× tighter than the library measured.
+	// (No known config sets it; documented in config.example.toml.)
 	final nbLeakage = (site['nb_leakage'] as num?)?.toDouble() ?? nbEffectiveLeakage;
 	final managed = site['managed'] as bool? ?? false;
 
@@ -396,10 +373,10 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 	};
 }
 
-/// Scores one (site, night) pair: computes dark window, moon geometry,
-/// calls scoreLocation() for the broadband baseline, runs the narrowband
-/// forward model (nb-model-v1), evaluates safety vetoes, and emits the
-/// BB/NB/Neither recommendation.
+/// Scores one (site, night) pair: computes dark window + moon geometry, calls
+/// scoreLocation() for factor sub-scores/vetoes/windows, composites BOTH bands via the
+/// retention-v2 product (retention.dart), evaluates safety vetoes, and emits the
+/// BB/NB/Neither recommendation plus the per-night 'scoring' audit block.
 Map<String, dynamic> _scoreOneNight({
 	required DateTime referenceDate,
 	required String label,
@@ -565,8 +542,15 @@ Map<String, dynamic> _scoreOneNight({
 	//    never raise a score, so it now applies even without AOD data — an improvement on
 	//    the v1 rule (the original smoke incident WAS a fire with under-resolved AOD).
 	final avgBurden = (moonIllum / 100.0) * moonGeom.avgSinAlt;
-	final aodMean = _aodWindowMean(
+	final aodMean = aodWindowMean(
 		forecast.airQuality, darkWindow.start!, darkWindow.end!);
+	// A feed that EXISTS but yielded no usable AOD must not silently score as perfectly
+	// transparent — that is the smoke-incident failure mode. Same stderr discipline as the
+	// moon-sampling and firesNearby guards (QA 2026-07-01, silent-failure-hunter).
+	if (aodMean == null && (forecast.airQuality?.isNotEmpty ?? false)) {
+		stderr.writeln('astrowidget-score: air-quality feed present for "$label" but no '
+			'usable AOD in the dark window — transparency scored as clear (unverified).');
+	}
 	final firePenalty = fireProximityPenalty(firesNearby);
 	final cloudFactor = loc.factorScores['cloud'] ?? 0;
 	final stabilityFactor = loc.factorScores['stability'] ?? 0;
@@ -626,8 +610,14 @@ Map<String, dynamic> _scoreOneNight({
 			avgBurden: 0.0, // the gap is moon-free by construction
 			bortle: siteBortle,
 			snowDepthM: meanSnowDepth,
-			aodMean: _aodWindowMean(
-				forecast.airQuality, moonFreeWindow.start, moonFreeWindow.end),
+			// Gap-sliced AOD, FALLING BACK to the night mean when the slice has no AOD
+			// rows (the air-quality feed is sparser than the cloud forecast, so a dawn
+			// gap can miss it). Aerosol known at the night level must not vanish in the
+			// slice — the gap would read BETTER transparency than the same night's
+			// headline (QA 2026-07-01, adversarial-tester).
+			aodMean: aodWindowMean(
+					forecast.airQuality, moonFreeWindow.start, moonFreeWindow.end) ??
+				aodMean,
 			firePenalty: firePenalty,
 			stabilityFactor: mf.factorScores['stability'] ?? 0,
 			nbLeakage: nbLeakage,

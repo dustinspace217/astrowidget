@@ -26,6 +26,7 @@
 //    principled gentle curve, the least-grounded term here, both bands share it.
 import 'dart:math' as math;
 import 'package:astrowidget_scoring/scoring/sky_brightness.dart';
+import 'package:astrowidget_scoring/weather/weather_models.dart';
 
 // ── Calibrated constants (do not tune casually — each traces to the fit above) ──
 
@@ -53,10 +54,16 @@ const double _moonMaxDeltaMag = 3.0;
 const double _snowGain = 0.3;
 
 // Floors. A retention of exactly 0 would make the composite blind to every OTHER effect
-// (0 × anything = 0), so floors keep the product ordered even in the mud.
+// (0 × anything = 0), so floors keep the product ordered even in the mud. The transparency
+// floor is 0.15, NOT the curve's last measured point (0.65 at AOD 0.6): wildfire-grade
+// AOD (1.5-5) is far beyond the measured range and physically devastating for imaging
+// (AOD 2 ≈ e⁻² ≈ 13% transmission), so the extrapolation continues the measured slope
+// down to 0.15 rather than flattening at 0.65-ish — a clear heavy-smoke night must read
+// dontBother, not marginal (QA 2026-07-01, silent-failure-hunter). The fire dock
+// multiplies SEPARATELY (below the floor is fine — the floor orders the AOD term only).
 const double _timeRetFloor = 0.02;
 const double _skyRetFloor = 0.05;
-const double _transpRetFloor = 0.50;
+const double _transpRetFloor = 0.15;
 const double _seeingRetFloor = 0.85;
 
 /// One band's retention set. `score` is ALWAYS round(100·product) — the audit identity.
@@ -130,17 +137,22 @@ double skyRetention(double deltaMag) =>
 	(1.0 - depthPerMag * deltaMag).clamp(_skyRetFloor, 1.0);
 
 /// Measured AOD curve (piecewise-linear, clamped flat below the first point, sloped to
-/// the floor beyond the last) × the FIRMS fire dock. null AOD → 1.0: the multiplicative
-/// identity IS the omit-not-zero rule (absence of data must never read as haze).
+/// the floor beyond the last) × the FIRMS fire dock. null AOD → the AOD term is 1.0
+/// (multiplicative identity IS the omit-not-zero rule — absence of data must never read
+/// as haze) but the FIRE term still docks: in a product it can never raise a score, and
+/// the original smoke incident WAS a nearby fire with under-resolved AOD (spec deviation,
+/// 2026-07-01).
 double transparencyRetention(double? aodMean, int firePenalty) {
 	double aodRet;
-	if (aodMean == null) {
+	if (aodMean == null || aodMean.isNaN) {
+		// NaN guard: the wrapper's aodWindowMean strips NaN, but a direct caller must not
+		// silently score NaN as "perfectly clear" via the fall-through init below.
 		aodRet = 1.0;
 	} else if (aodMean <= _aodCurve.first[0]) {
 		aodRet = _aodCurve.first[1];
 	} else if (aodMean >= _aodCurve.last[0]) {
-		// Continue the last segment's slope down to the floor (heavy smoke keeps hurting
-		// a little past the measured range, but bounded — beyond this is veto territory).
+		// Continue the last measured segment's slope down to the 0.15 floor — heavy smoke
+		// keeps hurting past the measured range (see the floors comment above).
 		final a = _aodCurve[_aodCurve.length - 2];
 		final b = _aodCurve.last;
 		final slope = (b[1] - a[1]) / (b[0] - a[0]);
@@ -159,6 +171,33 @@ double transparencyRetention(double? aodMean, int firePenalty) {
 	}
 	final fireRet = (1.0 - firePenalty.clamp(0, 100) / 100.0);
 	return (aodRet * fireRet).clamp(0.0, 1.0);
+}
+
+/// Window-mean aerosol optical depth — the transparency retention's input.
+///
+/// Receives: [airQuality] hourly rows (nullable — many sites have no air-quality feed);
+/// the window bounds. Returns: the mean of the non-null, non-NaN AOD readings inside the
+/// window, or null when there are none. The CALLER decides what null means: for the
+/// headline night it should warn on stderr when a feed exists but yielded nothing (a
+/// degraded feed silently reading "clear" during a smoke event is the failure mode this
+/// project exists to prevent); for a sub-window slice it should fall back to the night
+/// mean (data known at the night level must not vanish in the slice).
+double? aodWindowMean(
+	List<AirQuality>? airQuality,
+	DateTime start,
+	DateTime end,
+) {
+	if (airQuality == null || airQuality.isEmpty) return null;
+	var total = 0.0;
+	var count = 0;
+	for (final aq in airQuality) {
+		if (aq.time.isBefore(start) || aq.time.isAfter(end)) continue;
+		final aod = aq.aerosolOpticalDepth;
+		if (aod == null || aod.isNaN) continue;
+		total += aod;
+		count++;
+	}
+	return count == 0 ? null : total / count;
 }
 
 /// Seeing: gentle and least-grounded (see header). Typical (≥60) = 1.0; the worst

@@ -371,6 +371,13 @@ def test_partial_moon_emits_moonfree_window_and_bb():
 	mfb = n["moonFreeBroadband"]
 	assert isinstance(mfb["score"], int)
 	assert mfb["window"]["start"] < mfb["window"]["end"]
+	# The load-bearing claim (QA 2026-07-01): on a CLEAR partial-moon night the moon-free
+	# gap must score ABOVE the moon-averaged headline — that's the whole point of the
+	# third number. (Clear fixture → the gap can't be the cloudy part.)
+	assert mfb["score"] > n["broadband"]["score"], (
+		f"moon-free BB {mfb['score']} should beat the moonlit headline "
+		f"{n['broadband']['score']} on a clear night"
+	)
 
 
 def test_subhour_moonfree_gap_is_suppressed():
@@ -449,3 +456,24 @@ def test_overcast_still_craters_no_green_regression():
 	assert night["broadband"]["score"] <= 10
 	assert night["narrowband"]["score"] <= 10
 	assert night["recommendation"] == "Neither"
+
+
+def test_fire_docks_transparency_without_aod_through_binary():
+	"""The v2 spec deviation, locked at the binary level (QA 2026-07-01): a nearby fire
+	docks the transparency retention EVEN WITH NO AOD data. v1 refused (a fabricated
+	factor could raise the weighted mean); a multiplicative dock can only lower — and
+	the original smoke incident was a fire with under-resolved AOD. No airQuality is
+	sent here, so the dock below is attributable to the fire alone."""
+	start = datetime.fromisoformat(_NEW.replace("Z", "+00:00"))
+	fires = {"count": 12, "nearestKm": 40.0, "maxFrp": 80.0, "radiusKm": 150,
+			 "source": "VIIRS_NOAA20_NRT", "asOf": _NEW}
+	payload = {"now_utc": _NEW, "sites": [{"id": "s", "label": "S", "lat": 45.0,
+			   "lon": -120.0, "bortle": 2, "hourly": _clear_hourly(start),
+			   "firesNearby": fires}]}
+	out = subprocess.run([str(fx.SCORING_BINARY)], input=json.dumps(payload).encode(),
+						 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
+	night = json.loads(out.stdout)["sites"][0]["nights"][0]
+	sc = night["scoring"]
+	assert sc["inputs"]["aodMean"] is None  # genuinely no AOD in this run
+	assert sc["inputs"]["firePenalty"] > 0  # the fire registered
+	assert sc["broadband"]["retentions"]["transparency"] < 1.0  # and it docked

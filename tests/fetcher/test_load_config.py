@@ -190,7 +190,7 @@ def test_load_config_nb_leakage_valid(tmp_path, monkeypatch):
 
 
 def test_load_config_nb_leakage_absent_defaults_none(tmp_path, monkeypatch):
-	"""No nb_leakage → None (the Dart binary then uses its 0.05 default)."""
+	"""No nb_leakage → None (the Dart binary then uses the calibrated 0.38 — retention-v2)."""
 	cfg_path = _write_config(tmp_path, VALID_CONFIG, mode=0o600)
 	monkeypatch.setattr(fx, "CONFIG_PATH", cfg_path)
 	with patch.object(fx, "_notify"):

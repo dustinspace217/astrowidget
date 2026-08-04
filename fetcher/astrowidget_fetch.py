@@ -110,12 +110,24 @@ def _score_exe_name(platform: str) -> str:
 
 SCORING_BINARY = SCRIPT_DIR.parent / "bin" / _score_exe_name(sys.platform)
 
-# Astrospheric API endpoint — verified from official docs 2026-05-28.
-# https://www.astrospheric.com/dynamiccontent/api_info.html
+# Astrospheric Data API v2 endpoint — Astrospheric retired the V1 URL scheme in
+# their 2026-07-19 infrastructure migration ("customers using the Astrospheric
+# API will need to update their endpoints"). Docs:
+# https://www.astrospheric.com/DynamicContent/api_info_v2
+# Verified live 2026-08-04: same model run served identical Seeing, near-identical
+# Cloud, and a genuinely different (smoke-aware) Transparency vs V1.
 ASTROSPHERIC_FORECAST_URL = (
-	"https://astrosphericpublicaccess.azurewebsites.net/api/GetForecastData_V1"
+	"https://v2-api-public.astrospheric.com/api/GetForecastData"
 )
-ASTROSPHERIC_CREDIT_COST_PER_CALL = 5  # per official docs
+
+# V2 bills per VARIABLE, not per call. We request only what the widget consumes:
+# Cloud (15) + Transparency (30) + Seeing (20) = 65 credits/site/call. Omitting
+# the Variables array would bill the FULL set (~130), which at our 4×/day ×
+# 3-in-domain-site cadence (~48k/month) would blow the 29,900 monthly cap;
+# the 65-credit subset lands at ~24k/month. DewPoint/Temperature/Wind* are
+# deliberately NOT requested — those come from Open-Meteo already.
+ASTROSPHERIC_V2_VARIABLES = ("Cloud", "Transparency", "Seeing")
+ASTROSPHERIC_CREDIT_COST_PER_CALL = 65  # sum of the three variables' costs
 
 # Open-Meteo free, no key. Hourly forecast endpoint.
 # https://open-meteo.com/en/docs
@@ -251,14 +263,20 @@ def transparency_label(raw: float | None) -> str:
 		return "Poor"
 	return "Cloudy"
 
-# Required keys in an Astrospheric forecast response. Used to detect the
-# documented failure mode where Astrospheric returns HTTP 200 with an
-# {"error": "..."} body instead of forecast data. (Spec §13 risk.)
-ASTROSPHERIC_REQUIRED_KEYS = (
-	"Astrospheric_Seeing", "Astrospheric_Transparency",
-	"RDPS_CloudCover", "RDPS_DewPoint", "RDPS_Temperature",
-	"RDPS_WindVelocity", "RDPS_WindDirection",
-)
+# Legacy (V1) column names the rest of this file still speaks internally.
+# fetch_astrospheric adapts the V2 row-oriented response into these columns at
+# the fetch boundary, so ensemble_cloud_by_hour / merge_hourly / tests stay
+# untouched by the V2 migration. Mapping (V2 name → internal name):
+#   Seeing → Astrospheric_Seeing, Transparency → Astrospheric_Transparency,
+#   Cloud → RDPS_CloudCover.
+# The V1-era GFS_CloudCover/NAM_CloudCover extras no longer exist in V2; the
+# display convergence simply loses those two bonus rows (they were documented
+# as display-only and never fed scoring).
+ASTROSPHERIC_V2_TO_INTERNAL = {
+	"Seeing": "Astrospheric_Seeing",
+	"Transparency": "Astrospheric_Transparency",
+	"Cloud": "RDPS_CloudCover",
+}
 
 # Request timeout (seconds) per API call.
 HTTP_TIMEOUT = 30
@@ -486,8 +504,10 @@ def _in_astrospheric_domain(lat: float, lon: float) -> bool:
 
 def fetch_astrospheric(api_key: str, lat: float, lon: float) -> dict[str, Any]:
 	"""
-	POSTs to Astrospheric's GetForecastData_V1 endpoint and returns the parsed
-	JSON response. Retries once on HTTP 5xx with 30s backoff before giving up.
+	POSTs to Astrospheric's v2 GetForecastData endpoint, validates the response,
+	and returns it ADAPTED to the legacy V1 column shape (see
+	_adapt_astrospheric_v2) so every downstream consumer is untouched by the
+	2026-07 API migration. Retries once on HTTP 5xx before giving up.
 
 	On any RequestException, we re-raise a new exception with a SCRUBBED
 	message — the original requests exceptions can contain the full request
@@ -497,13 +517,15 @@ def fetch_astrospheric(api_key: str, lat: float, lon: float) -> dict[str, Any]:
 	fetch failed" plus the underlying exception type.
 
 	Receives: API key (string, never logged), latitude/longitude (floats).
-	Returns: parsed forecast JSON.
+	Returns: forecast dict in the internal (legacy-column) shape.
 	Raises: AstrosphericFetchError on persistent failure or shape mismatch.
 	"""
 	payload = {
 		"Latitude": lat,
 		"Longitude": lon,
 		"APIKey": api_key,
+		# Subset selection is load-bearing for cost — see ASTROSPHERIC_V2_VARIABLES.
+		"Variables": list(ASTROSPHERIC_V2_VARIABLES),
 	}
 	last_exc_type = "unknown"
 	for attempt in (1, 2):
@@ -551,24 +573,95 @@ def fetch_astrospheric(api_key: str, lat: float, lon: float) -> dict[str, Any]:
 			) from None
 
 		# Validate response shape — Astrospheric (and APIs generally) may
-		# return HTTP 200 with an error body during outages. Detect this
-		# before letting fabricated defaults flow downstream into scoring.
+		# return HTTP 200 with an error body during outages (V2 errors carry
+		# an {"ErrorInfo": ...} envelope, and an out-of-domain location returns
+		# "No Data"). Detect this before letting fabricated defaults flow
+		# downstream into scoring.
 		if not isinstance(parsed, dict):
 			raise AstrosphericFetchError(
 				"Astrospheric returned non-dict response (likely error body)",
 				code="no_data",
 			)
-		missing = [k for k in ASTROSPHERIC_REQUIRED_KEYS if k not in parsed]
-		if missing:
+		rows = parsed.get("HourlyForecast")
+		if not isinstance(rows, list) or not rows:
 			raise AstrosphericFetchError(
-				f"Astrospheric response missing required keys: {missing}",
+				"Astrospheric response has no HourlyForecast payload "
+				"(error or no-data body)",
 				code="no_data",
 			)
-		return parsed
+		# Every requested variable must be present in the rows. A variable the
+		# API silently stopped serving must fail loudly here, not score as
+		# permanently-clear downstream. Checked on the first row: the API
+		# builds rows uniformly from the requested Variables set, and per-hour
+		# gaps surface as null ActualValues, which the offset maps already skip.
+		missing = [v for v in ASTROSPHERIC_V2_VARIABLES if v not in rows[0]]
+		if missing:
+			raise AstrosphericFetchError(
+				f"Astrospheric response rows missing variables: {missing}",
+				code="no_data",
+			)
+		return _adapt_astrospheric_v2(parsed, rows)
 
 	raise AstrosphericFetchError(
 		f"Unreachable retry path ({last_exc_type})", code="internal"
 	)
+
+
+def _adapt_astrospheric_v2(
+	parsed: dict[str, Any], rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+	"""
+	Translates the V2 row-oriented response into the V1-style column shape the
+	rest of this file consumes. One documented boundary beats renaming every
+	internal consumer: the V2 migration (2026-07) changed transport + envelope,
+	not what the widget does with the numbers, so the adapter keeps the diff
+	surface at exactly one function.
+
+	Receives: `parsed` (full V2 response dict), `rows` (its validated,
+	non-empty HourlyForecast list).
+	Returns a dict with:
+	- UTCStartTime: ISO timestamp of the earliest-offset row. V1 provided this
+	  top-level; downstream alignment (UTCStartTime + HourOffset) depends on it.
+	- One legacy-named column per variable (ASTROSPHERIC_V2_TO_INTERNAL), each
+	  a list of {"Value": {ValueColor, ActualValue}, "HourOffset": n} entries —
+	  the exact V1 entry shape as_offset_map/astro_by_offset already parse.
+	- Pass-through metadata (TimeZone, ModelTime, APICreditsRemaining, ...).
+	"""
+	# Earliest HourOffset row anchors the timeline. Rows arrive offset-sorted
+	# from the live API, but min() costs nothing and survives reordering.
+	anchor = min(
+		(r for r in rows if isinstance(r.get("HourOffset"), (int, float))
+			and not isinstance(r.get("HourOffset"), bool)),
+		key=lambda r: r["HourOffset"],
+		default=rows[0],
+	)
+	adapted: dict[str, Any] = {
+		k: parsed.get(k)
+		for k in ("TimeZone", "UTCMinuteOffset", "ModelTime", "Latitude",
+		          "Longitude", "APICreditCostOfCall", "APICreditsRemaining")
+		if k in parsed
+	}
+	# UTCStartTime must be the OFFSET-ZERO epoch (downstream computes
+	# hour = UTCStartTime + HourOffset), so rewind the anchor row's timestamp
+	# by its own offset. On the live API the anchor IS offset 0 and this is a
+	# no-op, but a first-row offset of N would otherwise shift every hour by N.
+	# An unparseable timestamp yields UTCStartTime=None, which downstream
+	# already handles by warning and omitting seeing/transparency (never a
+	# silent hour-shift).
+	anchor_dt = _parse_utc_hour(anchor.get("UTCForecastHour"))
+	anchor_off = anchor.get("HourOffset")
+	if anchor_dt is not None and isinstance(anchor_off, (int, float)) \
+			and not isinstance(anchor_off, bool):
+		start_dt = anchor_dt - timedelta(hours=int(anchor_off))
+		adapted["UTCStartTime"] = start_dt.isoformat().replace("+00:00", "Z")
+	else:
+		adapted["UTCStartTime"] = anchor.get("UTCForecastHour")
+	for v2_name, internal_name in ASTROSPHERIC_V2_TO_INTERNAL.items():
+		adapted[internal_name] = [
+			{"Value": r.get(v2_name), "HourOffset": r.get("HourOffset")}
+			for r in rows
+		]
+	return adapted
 
 
 class AstrosphericFetchError(Exception):
@@ -1972,7 +2065,19 @@ def main() -> int:
 	cfg = load_config()
 	api_key = cfg.get("api", {}).get("astrospheric_key", "")
 	sites_cfg = cfg["sites"]
-	credit_budget = int(cfg.get("api", {}).get("astrospheric_daily_credit_budget", 100))
+	# V2 (2026-07) switched the allowance from 100/day to 29,900/MONTH, so the
+	# old daily key's VALUE is meaningless now (its example default was 100 —
+	# nonsense as a monthly budget). It is deliberately ignored rather than
+	# reinterpreted; a stderr note tells configs that still set it what to do.
+	# 0 still means "disable budget tracking", via the new key only.
+	_api_cfg = cfg.get("api", {})
+	if "astrospheric_daily_credit_budget" in _api_cfg:
+		sys.stderr.write(
+			"astrowidget: NOTE: astrospheric_daily_credit_budget is obsolete "
+			"(Astrospheric v2 bills 29,900 credits/MONTH); use "
+			"astrospheric_monthly_credit_budget instead. Ignoring the old key.\n"
+		)
+	credit_budget = int(_api_cfg.get("astrospheric_monthly_credit_budget", 29900))
 	# Smoke feature: optional FIRMS active-fire detection (free key). Absent → the
 	# fire path is skipped entirely (graceful degradation). Radius default 150 km.
 	firms_key = cfg.get("api", {}).get("firms_map_key", "")
@@ -1980,6 +2085,9 @@ def main() -> int:
 
 	now_utc = datetime.now(timezone.utc)
 	credit_cost = 0
+	# Latest APICreditsRemaining seen this run (None until a fetch succeeds).
+	# Set inside the site loop; consumed by the low-budget warning below it.
+	credits_remaining = None
 	site_results: list[dict[str, Any]] = []
 	scoring_sites: list[dict[str, Any]] = []
 	error_count = 0
@@ -2063,6 +2171,14 @@ def main() -> int:
 					try:
 						astro = fetch_astrospheric(api_key, lat, lon)
 						credit_cost += ASTROSPHERIC_CREDIT_COST_PER_CALL
+						# V2 reports the account's remaining monthly credits on
+						# every response — ground truth for the budget warning
+						# (cumulative across ALL the user's API use, which local
+						# per-run arithmetic can never see). Last site wins:
+						# it is the most recent, therefore lowest, reading.
+						_rem = astro.get("APICreditsRemaining")
+						if isinstance(_rem, (int, float)) and not isinstance(_rem, bool):
+							credits_remaining = int(_rem)
 					except AstrosphericFetchError as e:
 						as_failure = (str(e), getattr(e, "code", "error"))
 				else:
@@ -2234,13 +2350,19 @@ def main() -> int:
 		# decision form + the FITS grader join to (by observing-night date + site).
 		calibration_log.log_run(scoring_output, now_utc)
 
-	# Budget tracking — surface a notification once the user hits 80% of
-	# their daily Astrospheric quota so they have time to react.
-	if credit_budget > 0 and credit_cost >= int(credit_budget * 0.8):
+	# Budget tracking — surface a notification once the account is down to 20%
+	# of the monthly Astrospheric quota so the user has time to react. Uses the
+	# API's own APICreditsRemaining (cumulative ground truth across all their
+	# API use) rather than local per-run arithmetic, which can't see other
+	# consumers of the same key. No warning when no fetch succeeded this run —
+	# the failure paths already surface their own reasons.
+	if (credit_budget > 0 and credits_remaining is not None
+			and credits_remaining <= int(credit_budget * 0.2)):
 		_notify(
 			"Astrospheric quota warning",
-			f"This run used {credit_cost} credits; you're at "
-			f"{credit_cost}/{credit_budget} of today's budget.",
+			f"Only {credits_remaining} of {credit_budget} monthly Astrospheric "
+			f"credits remain (each run uses ~{credit_cost}). Credits refresh "
+			f"on the 1st (UTC).",
 			urgency="normal",
 		)
 
@@ -2252,6 +2374,8 @@ def main() -> int:
 		"lastUpdated": now_utc.isoformat().replace("+00:00", "Z"),
 		"astrosphericCreditCost": credit_cost,
 		"astrosphericCreditBudget": credit_budget,
+		# None until a run has at least one successful Astrospheric fetch.
+		"astrosphericCreditsRemaining": credits_remaining,
 		"sites": site_results,
 	}
 

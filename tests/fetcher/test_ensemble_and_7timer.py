@@ -209,7 +209,7 @@ def test_main_international_site_skips_astrospheric(tmp_path):
 	label scale. The seeing assertion also guards the fetch_7timer double-build
 	regression (a re-wrapped lookup would come back empty → '—')."""
 	cfg = {
-		"api": {"astrospheric_key": "fake", "astrospheric_daily_credit_budget": 100},
+		"api": {"astrospheric_key": "fake", "astrospheric_monthly_credit_budget": 29900},
 		"open_meteo": {"models": []},
 		"sites": [{
 			"id": "chile", "label": "Deep Sky Chile", "lat": -33.0, "lon": -70.0,
@@ -299,7 +299,7 @@ def test_main_mixed_na_and_international_in_one_run(tmp_path):
 	scale). Guards against cross-wiring the per-site source/convergence dicts —
 	the exact failure the 7-site routing could introduce."""
 	cfg = {
-		"api": {"astrospheric_key": "fake", "astrospheric_daily_credit_budget": 100},
+		"api": {"astrospheric_key": "fake", "astrospheric_monthly_credit_budget": 29900},
 		"open_meteo": {"models": []},
 		"sites": [
 			{"id": "na", "label": "NA Site", "lat": 45.0, "lon": -120.0,
@@ -345,7 +345,7 @@ def test_main_mixed_na_and_international_in_one_run(tmp_path):
 	by_id = {s["id"]: s for s in state["sites"]}
 	assert by_id["na"]["meta"]["source"] == "astrospheric+openmeteo"
 	assert by_id["intl"]["meta"]["source"] == "7timer+openmeteo"
-	assert state["astrosphericCreditCost"] == 5   # only the NA site spent credits
+	assert state["astrosphericCreditCost"] == 65  # only the NA site spent credits
 	# SAME raw seeing=2, but DIFFERENT labels — each site used its own scale,
 	# proving the per-site st_source wasn't cross-wired.
 	assert by_id["na"]["nights"][0]["displayFactors"]["seeing"]["label"] == "Below Average"
@@ -359,7 +359,7 @@ def intl_cfg():
 	builders above (_as / _om_one_hour / _scoring_stub), which stay plain
 	functions. Function-scoped, so each test gets a fresh dict (no leak)."""
 	return {
-		"api": {"astrospheric_key": "fake", "astrospheric_daily_credit_budget": 100},
+		"api": {"astrospheric_key": "fake", "astrospheric_monthly_credit_budget": 29900},
 		"open_meteo": {"models": []},
 		"sites": [{"id": "chile", "label": "Deep Sky Chile", "lat": -33.0, "lon": -70.0,
 				   "timezone": "America/Santiago", "primary": True}],

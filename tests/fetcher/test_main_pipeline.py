@@ -12,7 +12,6 @@ because partial-failure resilience is the whole point of the multi-site
 design.
 """
 
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -21,7 +20,7 @@ import astrowidget_fetch as fx
 
 
 VALID_CFG = {
-	"api": {"astrospheric_key": "fake", "astrospheric_daily_credit_budget": 100},
+	"api": {"astrospheric_key": "fake", "astrospheric_monthly_credit_budget": 29900},
 	"open_meteo": {"models": []},
 	"sites": [
 		{"id": "site_a", "label": "A", "lat": 47.0, "lon": -122.0, "timezone": "UTC"},
@@ -36,18 +35,18 @@ VALID_CFG = {
 }
 
 
-def _astrospheric_stub():
-	"""Minimal good-shape Astrospheric response."""
+def _astrospheric_stub(credits_remaining: int = 29000):
+	"""Minimal good-shape Astrospheric dict in fetch_astrospheric's RETURN shape
+	(post-V2-adapter internal columns, not the raw V2 wire format — the raw
+	format is exercised by test_fetch_astrospheric.py). `credits_remaining`
+	drives the monthly-budget warning; the default is comfortably healthy."""
 	return {
 		"TimeZone": "UTC",
-		"APICreditUsedToday": 5,
-		"Astrospheric_Seeing": [{"Value": 4, "ColorIndex": 1}],
-		"Astrospheric_Transparency": [{"Value": 3, "ColorIndex": 1}],
-		"RDPS_CloudCover": [{"Value": 10, "ColorIndex": 1}],
-		"RDPS_DewPoint": [{"Value": 281.5, "ColorIndex": 1}],
-		"RDPS_Temperature": [{"Value": 284.0, "ColorIndex": 1}],
-		"RDPS_WindVelocity": [{"Value": 2.5, "ColorIndex": 1}],
-		"RDPS_WindDirection": [{"Value": 220, "ColorIndex": 1}],
+		"APICreditsRemaining": credits_remaining,
+		"UTCStartTime": "2026-05-29T04:00:00Z",
+		"Astrospheric_Seeing": [{"Value": {"ActualValue": 4}, "HourOffset": 0}],
+		"Astrospheric_Transparency": [{"Value": {"ActualValue": 3}, "HourOffset": 0}],
+		"RDPS_CloudCover": [{"Value": {"ActualValue": 10}, "HourOffset": 0}],
 	}
 
 
@@ -181,7 +180,8 @@ def test_main_all_sites_fail_returns_3(patched_paths):
 
 
 def test_main_writes_credit_cost_to_state(patched_paths):
-	"""Per-site Astrospheric cost (5 credits) tallied in state.json."""
+	"""Per-site Astrospheric v2 cost (65 credits: Cloud 15 + Transparency 30 +
+	Seeing 20) tallied in state.json, plus the API-reported credits remaining."""
 	with patch.object(fx, "load_config", return_value=VALID_CFG), \
 		 patch.object(fx, "fetch_astrospheric", return_value=_astrospheric_stub()), \
 		 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
@@ -191,9 +191,10 @@ def test_main_writes_credit_cost_to_state(patched_paths):
 		fx.main()
 	import json
 	state = json.loads((patched_paths / "cache" / "state.json").read_text())
-	# 2 sites × 5 credits/call = 10 credits.
-	assert state["astrosphericCreditCost"] == 10
-	assert state["astrosphericCreditBudget"] == 100
+	# 2 sites × 65 credits/call = 130 credits.
+	assert state["astrosphericCreditCost"] == 130
+	assert state["astrosphericCreditBudget"] == 29900
+	assert state["astrosphericCreditsRemaining"] == 29000
 
 
 def test_main_merges_scoring_output_by_id(patched_paths):
@@ -215,23 +216,37 @@ def test_main_merges_scoring_output_by_id(patched_paths):
 	assert "nights" in by_id["site_b"]
 
 
-def test_main_budget_warning_fires_at_80pct(patched_paths):
-	"""When credit_cost ≥ 80% of budget, a normal-urgency notification fires."""
-	cfg = dict(VALID_CFG)
-	cfg["sites"] = [
-		{"id": f"site_{i}", "label": f"S{i}", "lat": 47.0+i, "lon": -122.0, "timezone": "UTC"}
-		for i in range(16)  # 16 sites × 5 credits = 80 credits = 80% of 100
-	]
-	with patch.object(fx, "load_config", return_value=cfg), \
-		 patch.object(fx, "fetch_astrospheric", return_value=_astrospheric_stub()), \
+def test_main_budget_warning_fires_when_credits_low(patched_paths):
+	"""When the API reports remaining monthly credits at/below 20% of the
+	budget, a normal-urgency notification fires. The trigger is the API's own
+	APICreditsRemaining (cumulative account truth), not local run arithmetic —
+	other consumers of the same key drain the pool invisibly to us."""
+	low = _astrospheric_stub(credits_remaining=5000)  # ≤ 29900 × 0.2 = 5980
+	with patch.object(fx, "load_config", return_value=VALID_CFG), \
+		 patch.object(fx, "fetch_astrospheric", return_value=low), \
 		 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
 		 patch.object(fx, "invoke_scoring_binary",
-					  return_value=_scoring_output()), \
+					  return_value=_scoring_output("site_a", "site_b")), \
 		 patch.object(fx, "_notify") as nf:
 		fx.main()
 	# A budget-warning notify-send must have been emitted.
 	titles = [c.args[0] for c in nf.call_args_list]
 	assert any("quota" in t.lower() or "budget" in t.lower() for t in titles)
+
+
+def test_main_budget_warning_silent_when_credits_healthy(patched_paths):
+	"""The inverse: a healthy remaining balance emits NO quota warning — the
+	stub's default 29000 sits far above the 5980 (20%) threshold. Guards
+	against the threshold comparison inverting silently."""
+	with patch.object(fx, "load_config", return_value=VALID_CFG), \
+		 patch.object(fx, "fetch_astrospheric", return_value=_astrospheric_stub()), \
+		 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
+		 patch.object(fx, "invoke_scoring_binary",
+					  return_value=_scoring_output("site_a", "site_b")), \
+		 patch.object(fx, "_notify") as nf:
+		fx.main()
+	titles = [c.args[0] for c in nf.call_args_list]
+	assert not any("quota" in t.lower() or "budget" in t.lower() for t in titles)
 
 
 # ── Astrospheric graceful fallback (lat/lon-derived, dismissable warning) ─────

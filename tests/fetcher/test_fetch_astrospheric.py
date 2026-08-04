@@ -121,6 +121,106 @@ def test_fetch_astrospheric_rejects_empty_hourly_forecast():
 			fx.fetch_astrospheric("test-key", 47.0, -122.0)
 
 
+def test_fetch_astrospheric_rejects_non_dict_rows():
+	"""QA CR-1 regression: non-dict rows must raise AstrosphericFetchError, not
+	escape as AttributeError — main() catches only AstrosphericFetchError /
+	RequestException per site, so an escape aborts the ENTIRE run. Both escape
+	variants confirmed empirically pre-fix: a string first row whose text
+	happens to contain the variable names (slipping the substring accident of
+	`v not in rows[0]`), and a corrupt LATER row after a valid row 0."""
+	sneaky = {"HourlyForecast": ["Cloud Transparency Seeing unavailable"]}
+	with patch.object(fx.requests, "post", return_value=_mock_response(200, sneaky)):
+		with pytest.raises(fx.AstrosphericFetchError) as ei:
+			fx.fetch_astrospheric("test-key", 47.0, -122.0)
+	assert ei.value.code == "no_data"
+
+	later = _good_response()
+	later["HourlyForecast"].append("corrupt")
+	with patch.object(fx.requests, "post", return_value=_mock_response(200, later)):
+		with pytest.raises(fx.AstrosphericFetchError) as ei:
+			fx.fetch_astrospheric("test-key", 47.0, -122.0)
+	assert ei.value.code == "no_data"
+
+
+def test_fetch_astrospheric_rewinds_utcstarttime_to_offset_zero():
+	"""QA TA-1: a forecast whose rows START at HourOffset 2 must synthesize the
+	OFFSET-ZERO epoch (row time minus its offset), because downstream computes
+	hour = UTCStartTime + HourOffset. Rows arrive REVERSED to also pin the
+	min()-anchor selection. Pre-fix revert-that-passes: returning the first
+	row's own timestamp shifted every hour by 2 with all other tests green."""
+	body = _good_response()
+	body["HourlyForecast"] = [
+		{
+			"UTCForecastHour": "2026-08-04T18:00:00Z", "HourOffset": 3,
+			"Cloud": {"ActualValue": 5.0}, "Transparency": {"ActualValue": 8.0},
+			"Seeing": {"ActualValue": 3.0},
+		},
+		{
+			"UTCForecastHour": "2026-08-04T17:00:00Z", "HourOffset": 2,
+			"Cloud": {"ActualValue": 4.0}, "Transparency": {"ActualValue": 9.0},
+			"Seeing": {"ActualValue": 4.0},
+		},
+	]
+	with patch.object(fx.requests, "post", return_value=_mock_response(200, body)):
+		result = fx.fetch_astrospheric("test-key", 47.0, -122.0)
+	# Anchor = the offset-2 row at 17:00Z → offset-zero epoch is 15:00Z.
+	assert result["UTCStartTime"] == "2026-08-04T15:00:00Z"
+
+
+def test_fetch_astrospheric_tolerates_null_values_in_later_rows(capsys):
+	"""QA TA-2: a null variable in a LATER row (per-hour gap) must not fail the
+	fetch — it becomes a {"Value": None} entry the downstream offset maps skip.
+	Only whole-column nullness is a loud event (see the all-null test below)."""
+	body = _good_response()
+	body["HourlyForecast"][1]["Seeing"] = None
+	with patch.object(fx.requests, "post", return_value=_mock_response(200, body)):
+		result = fx.fetch_astrospheric("test-key", 47.0, -122.0)
+	assert result["Astrospheric_Seeing"][1]["Value"] is None
+	# Hour 0 still carries its numeric value → no all-null warning either.
+	assert "no usable Seeing" not in capsys.readouterr().err
+
+
+def test_fetch_astrospheric_warns_on_all_null_column(capsys):
+	"""QA CR-2: a column that is present but ENTIRELY null degrades downstream
+	to '—'/free-source silently by design — so the fetch must say so on stderr
+	(the run-level signal an admin sees), while still succeeding for the other
+	variables."""
+	body = _good_response()
+	for row in body["HourlyForecast"]:
+		row["Seeing"] = None
+	with patch.object(fx.requests, "post", return_value=_mock_response(200, body)):
+		result = fx.fetch_astrospheric("test-key", 47.0, -122.0)
+	assert "no usable Seeing" in capsys.readouterr().err
+	# The fetch itself still succeeds with the other columns intact.
+	assert result["RDPS_CloudCover"][0]["Value"]["ActualValue"] == 12.0
+
+
+def test_fetch_astrospheric_falls_back_on_non_numeric_offsets():
+	"""QA TA-4: rows whose HourOffset is missing or a string must not crash the
+	adapter. UTCStartTime falls back to the first row's own timestamp, and the
+	column entries keep their raw HourOffset for astro_by_offset's positional
+	fallback."""
+	body = _good_response()
+	body["HourlyForecast"][0]["HourOffset"] = None
+	body["HourlyForecast"][1]["HourOffset"] = "3"
+	with patch.object(fx.requests, "post", return_value=_mock_response(200, body)):
+		result = fx.fetch_astrospheric("test-key", 47.0, -122.0)
+	assert result["UTCStartTime"] == "2026-08-04T15:00:00Z"
+	assert [e["HourOffset"] for e in result["Astrospheric_Seeing"]] == [None, "3"]
+
+
+def test_fetch_astrospheric_posts_to_v2_endpoint():
+	"""QA TA-5: pin the URL itself. Without this, reverting the endpoint
+	constant to the retired V1 host passes the whole suite. The literal
+	fragment guards the constant; the constant equality guards the call."""
+	mock = MagicMock(return_value=_mock_response(200, _good_response()))
+	with patch.object(fx.requests, "post", mock):
+		fx.fetch_astrospheric("test-key", 47.0, -122.0)
+	url = mock.call_args.args[0]
+	assert url == fx.ASTROSPHERIC_FORECAST_URL
+	assert "v2-api-public.astrospheric.com" in url
+
+
 def test_fetch_astrospheric_retries_on_5xx_then_succeeds():
 	"""500 on first attempt, 200 on second → caller sees success, no exception."""
 	calls = [_mock_response(500), _mock_response(200, _good_response())]

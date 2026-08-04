@@ -15,9 +15,11 @@ astrospheric_key = ""
 # Pro accounts get 29,900 credits per MONTH (Astrospheric API v2, since
 # 2026-07). The widget requests only Cloud + Transparency + Seeing, which
 # costs 65 credits per site per fetch — about 24k/month at the default
-# 4-fetches/day schedule with 3 in-coverage sites. The widget warns when the
-# account drops below 20% of this budget. Set to 0 to disable budget tracking.
-# Only in-coverage (RDPS-domain) sites use credits.
+# 4-fetches/day schedule with 3 in-coverage sites. Set this to your PLAN'S
+# monthly quota (the warning compares Astrospheric's own remaining-credits
+# counter against 20% of this number — it is a warning threshold, not an
+# enforced cap; the widget never skips fetches). Set to 0 to disable budget
+# tracking. Only in-coverage (RDPS-domain) sites use credits.
 # (The pre-v2 key `astrospheric_daily_credit_budget` is obsolete and ignored.)
 astrospheric_monthly_credit_budget = 29900
 

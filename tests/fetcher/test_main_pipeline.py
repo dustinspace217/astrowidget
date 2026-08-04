@@ -234,6 +234,101 @@ def test_main_budget_warning_fires_when_credits_low(patched_paths):
 	assert any("quota" in t.lower() or "budget" in t.lower() for t in titles)
 
 
+def test_main_budget_warning_boundary(patched_paths):
+	"""QA TA-3: the threshold is REMAINING ≤ int(budget × 0.2) = 5980 for the
+	29,900 default. Exactly 5980 fires; 5981 stays silent. Pins the comparison
+	direction and the 0.2 factor against silent regression."""
+	for remaining, should_fire in ((5980, True), (5981, False)):
+		with patch.object(fx, "load_config", return_value=VALID_CFG), \
+			 patch.object(fx, "fetch_astrospheric",
+						  return_value=_astrospheric_stub(credits_remaining=remaining)), \
+			 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
+			 patch.object(fx, "invoke_scoring_binary",
+						  return_value=_scoring_output("site_a", "site_b")), \
+			 patch.object(fx, "_notify") as nf:
+			fx.main()
+		titles = [c.args[0] for c in nf.call_args_list]
+		fired = any("quota" in t.lower() or "budget" in t.lower() for t in titles)
+		assert fired is should_fire, f"remaining={remaining}: fired={fired}"
+
+
+def test_main_budget_zero_disables_warning(patched_paths):
+	"""QA TA-3: budget 0 = tracking disabled — no quota warning even with the
+	account nearly drained."""
+	cfg = dict(VALID_CFG)
+	cfg["api"] = {"astrospheric_key": "fake", "astrospheric_monthly_credit_budget": 0}
+	with patch.object(fx, "load_config", return_value=cfg), \
+		 patch.object(fx, "fetch_astrospheric",
+					  return_value=_astrospheric_stub(credits_remaining=1)), \
+		 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
+		 patch.object(fx, "invoke_scoring_binary",
+					  return_value=_scoring_output("site_a", "site_b")), \
+		 patch.object(fx, "_notify") as nf:
+		fx.main()
+	titles = [c.args[0] for c in nf.call_args_list]
+	assert not any("quota" in t.lower() or "budget" in t.lower() for t in titles)
+
+
+def test_main_credits_remaining_last_site_wins(patched_paths):
+	"""QA TA-7: with two in-domain sites, state.json records the LAST site's
+	APICreditsRemaining (most recent = lowest). A first-site-wins regression
+	would overstate the remaining pool."""
+	with patch.object(fx, "load_config", return_value=VALID_CFG), \
+		 patch.object(fx, "fetch_astrospheric",
+					  side_effect=[_astrospheric_stub(credits_remaining=10000),
+								   _astrospheric_stub(credits_remaining=5000)]), \
+		 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
+		 patch.object(fx, "invoke_scoring_binary",
+					  return_value=_scoring_output("site_a", "site_b")), \
+		 patch.object(fx, "_notify"):
+		fx.main()
+	import json
+	state = json.loads((patched_paths / "cache" / "state.json").read_text())
+	assert state["astrosphericCreditsRemaining"] == 5000
+
+
+def test_main_pipeline_consumes_real_adapter_output(patched_paths):
+	"""QA TA-6: the other main() tests stub fetch_astrospheric with a
+	hand-written post-adapter dict, so that stub could drift from what
+	_adapt_astrospheric_v2 actually emits with both suites green. Here only
+	requests.post is patched — the REAL fetch_astrospheric + adapter run
+	inside the pipeline — proving the adapted shape is what main() consumes."""
+	raw_v2 = {
+		"TimeZone": "UTC",
+		"ModelTime": "2026080412",
+		"APICreditCostOfCall": 65,
+		"APICreditsRemaining": 4321,
+		"HourlyForecast": [{
+			"UTCForecastHour": "2026-05-29T04:00:00Z",
+			"HourOffset": 0,
+			"Cloud": {"ValueColor": "#000000", "ActualValue": 10.0},
+			"Transparency": {"ValueColor": "#000000", "ActualValue": 3.0},
+			"Seeing": {"ValueColor": "#000000", "ActualValue": 4.0},
+		}],
+	}
+	from unittest.mock import MagicMock
+	resp = MagicMock()
+	resp.status_code = 200
+	resp.raise_for_status.return_value = None
+	resp.json.return_value = raw_v2
+	with patch.object(fx, "load_config", return_value=VALID_CFG), \
+		 patch.object(fx.requests, "post", return_value=resp), \
+		 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
+		 patch.object(fx, "fetch_7timer", return_value={}), \
+		 patch.object(fx, "invoke_scoring_binary",
+					  return_value=_scoring_output("site_a", "site_b")), \
+		 patch.object(fx, "_notify"):
+		rc = fx.main()
+	assert rc == 0
+	import json
+	state = json.loads((patched_paths / "cache" / "state.json").read_text())
+	assert state["astrosphericCreditsRemaining"] == 4321
+	by_id = {s["id"]: s for s in state["sites"]}
+	# Both fixture sites are in-domain; the real adapter fed the pipeline.
+	assert by_id["site_a"]["meta"]["source"] == "astrospheric+openmeteo"
+	assert by_id["site_a"]["meta"]["APICreditCostOfCall"] == 65
+
+
 def test_main_budget_warning_silent_when_credits_healthy(patched_paths):
 	"""The inverse: a healthy remaining balance emits NO quota warning — the
 	stub's default 29000 sits far above the 5980 (20%) threshold. Guards

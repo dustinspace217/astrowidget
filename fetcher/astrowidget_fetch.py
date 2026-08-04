@@ -507,7 +507,8 @@ def fetch_astrospheric(api_key: str, lat: float, lon: float) -> dict[str, Any]:
 	POSTs to Astrospheric's v2 GetForecastData endpoint, validates the response,
 	and returns it ADAPTED to the legacy V1 column shape (see
 	_adapt_astrospheric_v2) so every downstream consumer is untouched by the
-	2026-07 API migration. Retries once on HTTP 5xx before giving up.
+	2026-07 API migration. Retries once on a network-layer error or an HTTP
+	5xx before giving up.
 
 	On any RequestException, we re-raise a new exception with a SCRUBBED
 	message — the original requests exceptions can contain the full request
@@ -589,6 +590,18 @@ def fetch_astrospheric(api_key: str, lat: float, lon: float) -> dict[str, Any]:
 				"(error or no-data body)",
 				code="no_data",
 			)
+		# Every row must be a dict BEFORE any .get() touches it. Without this,
+		# a corrupt body like {"HourlyForecast": ["No Data"]} escapes as an
+		# AttributeError in the adapter — which main()'s per-site handlers
+		# (AstrosphericFetchError / RequestException) don't catch, so ONE bad
+		# body would abort the ENTIRE run instead of degrading one site.
+		# (QA CR-1, escape confirmed empirically 2026-08-04.)
+		if not all(isinstance(r, dict) for r in rows):
+			raise AstrosphericFetchError(
+				"Astrospheric HourlyForecast contains non-object rows "
+				"(error or no-data body)",
+				code="no_data",
+			)
 		# Every requested variable must be present in the rows. A variable the
 		# API silently stopped serving must fail loudly here, not score as
 		# permanently-clear downstream. Checked on the first row: the API
@@ -618,10 +631,12 @@ def _adapt_astrospheric_v2(
 	surface at exactly one function.
 
 	Receives: `parsed` (full V2 response dict), `rows` (its validated,
-	non-empty HourlyForecast list).
+	non-empty HourlyForecast list of dicts).
 	Returns a dict with:
-	- UTCStartTime: ISO timestamp of the earliest-offset row. V1 provided this
-	  top-level; downstream alignment (UTCStartTime + HourOffset) depends on it.
+	- UTCStartTime: the OFFSET-ZERO epoch as an ISO timestamp, derived by
+	  rewinding the earliest-offset row's time by its own offset. V1 provided
+	  this top-level; downstream alignment (UTCStartTime + HourOffset)
+	  depends on it.
 	- One legacy-named column per variable (ASTROSPHERIC_V2_TO_INTERNAL), each
 	  a list of {"Value": {ValueColor, ActualValue}, "HourOffset": n} entries —
 	  the exact V1 entry shape as_offset_map/astro_by_offset already parse.
@@ -652,15 +667,33 @@ def _adapt_astrospheric_v2(
 	anchor_off = anchor.get("HourOffset")
 	if anchor_dt is not None and isinstance(anchor_off, (int, float)) \
 			and not isinstance(anchor_off, bool):
-		start_dt = anchor_dt - timedelta(hours=int(anchor_off))
+		start_dt = anchor_dt - timedelta(hours=round(anchor_off))
 		adapted["UTCStartTime"] = start_dt.isoformat().replace("+00:00", "Z")
 	else:
 		adapted["UTCStartTime"] = anchor.get("UTCForecastHour")
 	for v2_name, internal_name in ASTROSPHERIC_V2_TO_INTERNAL.items():
-		adapted[internal_name] = [
+		column = [
 			{"Value": r.get(v2_name), "HourOffset": r.get("HourOffset")}
 			for r in rows
 		]
+		adapted[internal_name] = column
+		# A column that is present but yields ZERO numeric values (every hour
+		# null) degrades downstream to "—"/OM-only silently — the offset maps
+		# skip nulls by design. That per-hour tolerance is right, but a WHOLE
+		# column of nulls is a feed problem the user should see, not silence
+		# (QA CR-2; same principle as the degraded-AOD warning in scoring).
+		has_numeric = any(
+			isinstance(e["Value"], dict)
+			and isinstance(e["Value"].get("ActualValue"), (int, float))
+			and not isinstance(e["Value"].get("ActualValue"), bool)
+			for e in column
+		)
+		if not has_numeric:
+			sys.stderr.write(
+				f"astrowidget: WARNING: Astrospheric returned no usable "
+				f"{v2_name} values this run — that variable degrades to "
+				f"free-source/'—' display.\n"
+			)
 	return adapted
 
 
@@ -2195,7 +2228,9 @@ def main() -> int:
 				meta = {
 					"source": "astrospheric+openmeteo",
 					"TimeZone": astro.get("TimeZone"),
-					"APICreditUsedToday": astro.get("APICreditUsedToday"),
+					# V1's APICreditUsedToday no longer exists in v2; the
+					# per-call cost is the meaningful per-site number now.
+					"APICreditCostOfCall": astro.get("APICreditCostOfCall"),
 				}
 			else:
 				# Free path — used both for out-of-domain sites (silent) and for

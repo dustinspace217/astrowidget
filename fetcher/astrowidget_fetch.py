@@ -488,18 +488,25 @@ def _fail_config(title: str, body: str) -> None:
 def _in_astrospheric_domain(lat: float, lon: float) -> bool:
 	"""
 	True if (lat, lon) is inside Astrospheric's coverage. Astrospheric is built
-	on Environment Canada's RDPS regional model, which covers North America only,
-	so we use a generous North-America bounding box (CONUS, Canada, Alaska,
-	Hawaii, Mexico). Out-of-box sites use Open-Meteo + 7Timer with no Astrospheric
-	attempt and no warning; in-box sites attempt Astrospheric and, if it fails
-	(edge of coverage, key, outage), fall back with a dismissable UI notice.
+	on Environment Canada's RDPS regional model; the v2 API docs state the
+	domain as "North America, Greenland, Iceland, Ireland, and the UK"
+	(api_info_v2.html, and live-probe confirmed 2026-08-06: Birr IE / Kielder
+	UK / Reykjavik IS all return full forecasts; Tenerife returns No Data).
+	The eastern bound is 2.0°E so the UK's east coast (~1.8°E) is inside.
+	Out-of-box sites use Open-Meteo + 7Timer with no Astrospheric attempt and
+	no warning; in-box sites attempt Astrospheric and, if it fails (edge of
+	coverage, key, outage), fall back with a dismissable UI notice.
 
 	The box is deliberately generous: too tight would silently drop paid
 	Astrospheric data the user is owed, whereas too loose only ever shows a
-	one-time dismissable notice where Astrospheric can't actually serve. The live
-	fetch is the real check; this box only decides whether to attempt it.
+	one-time dismissable notice where Astrospheric can't actually serve — e.g.
+	the Canary Islands are inside this box but outside the served domain
+	(probe-verified No Data, 2026-08-06; the refused call also bills 0
+	credits), and simply degrade to the free path via the live fetch's
+	No-Data fallback. The live fetch is the real check; this box only decides
+	whether to attempt it.
 	"""
-	return 14.0 <= lat <= 84.0 and -170.0 <= lon <= -50.0
+	return 14.0 <= lat <= 84.0 and -170.0 <= lon <= 2.0
 
 
 def fetch_astrospheric(api_key: str, lat: float, lon: float) -> dict[str, Any]:

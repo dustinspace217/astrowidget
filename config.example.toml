@@ -5,9 +5,11 @@
 # The fetcher refuses to read configs that are not 0600.
 
 [api]
-# Astrospheric is OPTIONAL — it adds a North-America-only "Cloud Sense" feed plus
-# its own seeing/transparency for sites inside its coverage. Without a key (or for
-# sites outside North America) the widget uses the free 7Timer + Open-Meteo
+# Astrospheric is OPTIONAL — it adds a "Cloud Sense" feed plus its own
+# seeing/transparency for sites inside its coverage (North America, Greenland,
+# Iceland, Ireland, and the UK — "the RDPS Domain" per Astrospheric's v2 API
+# docs). Without a key (or for
+# sites outside that coverage) the widget uses the free 7Timer + Open-Meteo
 # sources automatically. Get a Pro key from https://www.astrospheric.com/account
 # (Pro tier is required for API access); leave it blank to run entirely free.
 astrospheric_key = ""
@@ -19,7 +21,8 @@ astrospheric_key = ""
 # monthly quota (the warning compares Astrospheric's own remaining-credits
 # counter against 20% of this number — it is a warning threshold, not an
 # enforced cap; the widget never skips fetches). Set to 0 to disable budget
-# tracking. Only in-coverage (RDPS-domain) sites use credits.
+# tracking. Only calls that return data consume credits — an attempt the API
+# refuses with "No Data" bills 0 (verified against the live counter 2026-08-06).
 # (The pre-v2 key `astrospheric_daily_credit_budget` is obsolete and ignored.)
 astrospheric_monthly_credit_budget = 29900
 
@@ -36,7 +39,7 @@ firms_radius_km = 150
 
 # Open-Meteo is free and requires no key.
 [open_meteo]
-# Open-Meteo cloud-cover models for the multi-model ensemble. For North-America
+# Open-Meteo cloud-cover models for the multi-model ensemble. For in-coverage
 # sites with a working Astrospheric feed, these three are averaged with
 # Astrospheric's Cloud Sense (RDPS) into the consensus cloud; everywhere else
 # (and whenever Astrospheric is unavailable) these three ARE the ensemble on
@@ -51,7 +54,8 @@ models = ["gfs_seamless", "ecmwf_ifs04", "icon_seamless"]
 # `id` must be lowercase a-z 0-9; it is used as the state.json key.
 #
 # Astrospheric eligibility is AUTOMATIC, derived from lat/lon: sites inside its
-# North-America coverage use the Astrospheric feed (when a key is set above), and
+# coverage (North America, Greenland, Iceland, Ireland, and the UK) use the
+# Astrospheric feed (when a key is set above), and
 # the rest use 7Timer + Open-Meteo. If an in-coverage site's Astrospheric data
 # fails (no key, rejected key, outage), the site falls back to the free sources
 # and shows a dismissable notice — there is nothing to configure for that.
@@ -103,7 +107,7 @@ timezone = "UTC"
 #                           # unless you've measured your own stack.
 
 # A hosted / REMOTE observatory — weatherproof dome, so set managed = true
-# (Astrospheric is used automatically if it's in North America):
+# (Astrospheric is used automatically if it's inside Astrospheric coverage):
 # [[sites]]
 # id = "site_b"
 # label = "Remote Observatory"
@@ -113,7 +117,7 @@ timezone = "UTC"
 # managed = true            # weatherproof dome: skip the precip equipment veto
 # bortle = 3                # dark hosted site (refines the sky-brightness baseline)
 
-# A site outside North America — automatically uses 7Timer + Open-Meteo:
+# A site outside Astrospheric coverage — automatically uses 7Timer + Open-Meteo:
 # [[sites]]
 # id = "site_c"
 # label = "Southern Hemisphere Site"

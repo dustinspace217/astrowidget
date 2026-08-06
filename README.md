@@ -5,7 +5,8 @@ for up to three imaging sites tonight (and the next two nights), with verdicts
 for broadband and narrowband imaging modes.
 
 Data combines [Astrospheric](https://www.astrospheric.com/) (atmospheric
-transparency and seeing — Pro subscription, **optional**, North America only),
+transparency and seeing — Pro subscription, **optional**, covers North America,
+Greenland, Iceland, Ireland & the UK),
 [Open-Meteo](https://open-meteo.com/) (multi-model cloud cover, precipitation
 probability, wind gusts — free, no key), and [7Timer!](https://www.7timer.info/)
 (free seeing/transparency for sites Astrospheric doesn't cover). Astrospheric is
@@ -46,7 +47,8 @@ KDE Plasma 6 and may work on other Plasma 6 distributions without modification.
 - Python 3.12 or later
 - Dart SDK 3.11 or later (for building the scoring binary)
 - *(Optional)* An [Astrospheric Pro](https://www.astrospheric.com/account) account
-  and API key — adds a North-America-only transparency/seeing feed. Without it, the
+  and API key — adds a higher-quality transparency/seeing feed for sites in
+  North America, Greenland, Iceland, Ireland & the UK. Without it, the
   widget uses the free 7Timer + Open-Meteo sources automatically.
 - `requests` (`pip install requests`)
 - `notify-send` (provided by libnotify on most distributions)
@@ -169,7 +171,8 @@ See `config.example.toml` for the full template. Minimum to get running:
 
 1. Add one or more `[[sites]]` blocks with real lat/lon and a timezone.
 2. *(Optional)* Set `astrospheric_key` to your Pro API key — adds the
-   North-America transparency/seeing feed. Blank = run entirely on free sources.
+   Astrospheric transparency/seeing feed for in-coverage sites. Blank = run
+   entirely on free sources.
 3. (Optional) Tune per-site thresholds in `[thresholds.<site_id>]` blocks.
 4. (Optional) Adjust `[notifications]` to your taste.
 
@@ -185,10 +188,10 @@ any is unavailable:
 |---|---|---|---|
 | **Open-Meteo** | Free | Global | Multi-model cloud, precip, wind/gusts, visibility, temp/dewpoint |
 | **7Timer!** | Free | Global | Seeing & transparency (NCEP GFS-derived) |
-| **Astrospheric** | Pro key | North America | Higher-quality transparency, seeing, RDPS cloud |
+| **Astrospheric** | Pro key | North America, Greenland, Iceland, Ireland, UK | Higher-quality transparency, seeing, RDPS cloud |
 
 **Astrospheric eligibility is automatic, derived from each site's lat/lon** — there
-is no per-site flag. A site inside Astrospheric's North-America coverage uses it
+is no per-site flag. A site inside Astrospheric's coverage uses it
 *if you've supplied a key*; every other site (and every site, if you supply no key)
 runs on the free 7Timer + Open-Meteo path. The widget never hard-fails for want of
 a key.

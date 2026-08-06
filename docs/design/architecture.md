@@ -57,7 +57,7 @@ this to two). **Astrospheric is optional**; the free sources cover every site:
 |---|---|---|---|
 | **Open-Meteo** | Free | Global | Multi-model cloud, precip, wind/gusts, visibility, temp/dewpoint |
 | **7Timer!** | Free | Global | Seeing & transparency (NCEP GFS-derived) |
-| **Astrospheric** | Pro key | North America | Higher-quality transparency, seeing, RDPS cloud |
+| **Astrospheric** | Pro key | North America, Greenland, Iceland, Ireland, UK | Higher-quality transparency, seeing, RDPS cloud |
 
 Astrospheric eligibility is **derived automatically from each site's lat/lon** —
 there is no per-site flag. In-coverage sites use it when a key is present;

@@ -373,8 +373,9 @@ def test_main_in_domain_astrospheric_failure_degrades_not_errors(patched_paths):
 
 
 def test_main_out_of_domain_site_uses_free_path_silently(patched_paths):
-	"""A site outside Astrospheric's North-America box uses Open-Meteo + 7Timer
-	with NO Astrospheric attempt and NO degraded[astrospheric] entry."""
+	"""A site outside Astrospheric's coverage box (v2: North America, Greenland,
+	Iceland, Ireland, UK) uses Open-Meteo + 7Timer with NO Astrospheric attempt
+	and NO degraded[astrospheric] entry."""
 	cfg = dict(VALID_CFG)
 	cfg["sites"] = [
 		{"id": "intl", "label": "Intl", "lat": -33.0, "lon": 18.0, "timezone": "UTC"},
@@ -392,6 +393,68 @@ def test_main_out_of_domain_site_uses_free_path_silently(patched_paths):
 	state = json.loads((patched_paths / "cache" / "state.json").read_text())
 	degraded = state["sites"][0].get("meta", {}).get("degraded", [])
 	assert not any(d["source"] == "astrospheric" for d in degraded)
+
+
+def test_main_new_v2_region_site_attempts_astrospheric(patched_paths):
+	"""A UK-coordinate site (inside the v2-widened box, outside the old
+	North-America box) actually ATTEMPTS Astrospheric through the real main()
+	eligibility wiring — closing the gap between the domain test's docstring
+	("must attempt Astrospheric") and what previously ran: no pipeline test
+	used a new-region coordinate, so a revert of the box widening would have
+	passed every attempt-path test. (QA TA-5, 2026-08-06.)"""
+	cfg = dict(VALID_CFG)
+	cfg["sites"] = [
+		{"id": "kielder", "label": "Kielder", "lat": 55.233, "lon": -2.616,
+		 "timezone": "Europe/London"},
+	]
+	with patch.object(fx, "load_config", return_value=cfg), \
+		 patch.object(fx, "fetch_astrospheric",
+					  return_value=_astrospheric_stub()) as fa, \
+		 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
+		 patch.object(fx, "invoke_scoring_binary",
+					  return_value=_scoring_output("kielder")), \
+		 patch.object(fx, "_notify"):
+		rc = fx.main()
+	assert rc == 0
+	# The paid feed was attempted for the UK site — under the old box this
+	# mock would never be called and the assertion fails.
+	assert fa.called
+	called_lat, called_lon = fa.call_args.args[1], fa.call_args.args[2]
+	assert (called_lat, called_lon) == (55.233, -2.616)
+
+
+def test_main_in_box_unserved_site_degrades_no_data(patched_paths):
+	"""An in-box-but-unserved site (Canary Islands — inside the v2-widened
+	eligibility box, refused by the API with No Data; probe-verified
+	2026-08-06) degrades to the free path with a dismissable no_data entry
+	and zero credit cost. This is the population the box widening newly
+	enrolls in the attempt path, and it had no pipeline coverage before.
+	(QA Phase B, CR's cross-exam of TA-5.)"""
+	cfg = dict(VALID_CFG)
+	cfg["sites"] = [
+		{"id": "teide", "label": "Teide", "lat": 28.3, "lon": -16.5,
+		 "timezone": "Atlantic/Canary"},
+	]
+	with patch.object(fx, "load_config", return_value=cfg), \
+		 patch.object(fx, "fetch_astrospheric",
+					  side_effect=fx.AstrosphericFetchError(
+						  "no HourlyForecast payload", code="no_data")) as fa, \
+		 patch.object(fx, "fetch_open_meteo", return_value=_open_meteo_stub()), \
+		 patch.object(fx, "fetch_7timer", return_value={}), \
+		 patch.object(fx, "invoke_scoring_binary",
+					  return_value=_scoring_output("teide")), \
+		 patch.object(fx, "_notify"):
+		rc = fx.main()
+	assert rc == 0
+	assert fa.called  # in-box → the attempt happens (old box: never called)
+	import json
+	state = json.loads((patched_paths / "cache" / "state.json").read_text())
+	site = state["sites"][0]
+	assert site["status"] == "ok"  # degraded, not errored
+	entry = next(d for d in site["meta"]["degraded"]
+				 if d["source"] == "astrospheric")
+	assert entry["code"] == "no_data"
+	assert state["astrosphericCreditCost"] == 0  # refusals bill nothing
 
 
 def test_main_in_domain_no_key_degrades_no_key(patched_paths):

@@ -20,7 +20,8 @@ three writers share, with the join built in, and durable across the weeks of
 accumulation the re-tune needs.
 
 NOTE on scope (2026-06-03, per Dustin): decisions + FITS grading focus on the
-HOME site (Bainbridge — the one he can directly verify). The forecast log records
+HOME site (Bainbridge through 2026-08, CSV — Chiricahua Sky Village — since
+the scope moved; the one he can directly verify). The forecast log records
 ALL configured sites, because it's free (the scores are already computed) and a
 complete record is more useful later; the join simply only has decision/grade rows
 for the sites we actually label.
@@ -115,6 +116,31 @@ CREATE TABLE IF NOT EXISTS decisions (
     reason      TEXT,                -- why not (or a free note when imaged)
     notes       TEXT,
     UNIQUE(night_date, site_id)      -- one decision per night+site (the form upserts)
+);
+
+CREATE TABLE IF NOT EXISTS sky_readings (
+    id            INTEGER PRIMARY KEY,
+    captured_at   TEXT NOT NULL,    -- ISO-UTC of the capture run
+    night_date    TEXT NOT NULL,    -- observing-night date, the join key
+    site_id       TEXT NOT NULL,
+    -- indi-allsky's per-image SQM statistic over the night's dark window.
+    -- IMPORTANT UNITS CAVEAT: this is the camera's RELATIVE luminance metric
+    -- (exposure/gain-normalized ADU), NOT calibrated mag/arcsec² — unless the
+    -- camera owner has calibrated it. Lower = darker (probed live 2026-08-18:
+    -- night floor ~1,250 vs daytime in the millions at the CSV camera). Store
+    -- it raw; convert at analysis time if a calibration ever exists.
+    sqm_median    REAL,
+    sqm_min       REAL,             -- darkest moment of the night
+    sqm_max       REAL,             -- brightest (moon/cloud/twilight edge)
+    stars_median  REAL,             -- detected-star-count median (same window)
+    stars_max     INTEGER,
+    sample_count  INTEGER,          -- how many camera frames fell in the window
+    dark_start    TEXT,             -- the window the stats were clipped to
+    dark_end      TEXT,
+    source        TEXT,             -- the charts-endpoint URL (provenance)
+    UNIQUE(night_date, site_id)     -- one reading per night+site; re-runs upsert,
+                                    -- so a partial mid-night capture self-heals
+                                    -- when the morning run replaces it
 );
 
 CREATE TABLE IF NOT EXISTS fits_grades (
@@ -445,3 +471,56 @@ def pending_nights(conn: sqlite3.Connection, site_id: str, limit: int = 14,
 		(site_id, as_of, limit),
 	).fetchall()
 	return [r[0] for r in rows]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sky-reading support (allsky SQM capture, 2026-08-18). Same pattern as the
+# decision helpers: take an open connection, unit-tested apart from the fetch
+# script (allsky_sqm.py) that calls them.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def latest_dark_window(conn: sqlite3.Connection, night_date: str,
+					   site_id: str) -> tuple[str, str] | None:
+	"""The (dark_start, dark_end) ISO strings from the most recent forecast row
+	for (night_date, site) — the astro-dark window the SQM stats clip to. The
+	fetch logs one 4x/day, so by morning the freshest row carries the final
+	window. None when no forecast was logged (fetch outage) or the site had no
+	astro dark that night (both bounds NULL) — the caller reports and skips."""
+	row = conn.execute(
+		"""SELECT dark_start, dark_end FROM forecasts
+		   WHERE night_date = ? AND site_id = ? COLLATE NOCASE
+			 AND night_label = 'Tonight'
+			 AND dark_start IS NOT NULL AND dark_end IS NOT NULL
+		   ORDER BY fetched_at DESC LIMIT 1""",
+		(night_date, site_id),
+	).fetchone()
+	return (row[0], row[1]) if row else None
+
+
+def upsert_sky_reading(conn: sqlite3.Connection, night_date: str, site_id: str,
+					   sqm_median: float, sqm_min: float, sqm_max: float,
+					   stars_median: float | None, stars_max: int | None,
+					   sample_count: int, dark_start: str, dark_end: str,
+					   source: str) -> None:
+	"""Insert or replace the night's sky reading (one per night+site via the
+	UNIQUE constraint). Re-running a capture — e.g. a mid-night smoke test
+	followed by the real morning run — REPLACES the partial row with the full
+	one, so the newest capture always wins."""
+	conn.execute(
+		"""INSERT INTO sky_readings (
+			captured_at, night_date, site_id, sqm_median, sqm_min, sqm_max,
+			stars_median, stars_max, sample_count, dark_start, dark_end, source
+		   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+		   ON CONFLICT(night_date, site_id) DO UPDATE SET
+			 captured_at = excluded.captured_at,
+			 sqm_median = excluded.sqm_median, sqm_min = excluded.sqm_min,
+			 sqm_max = excluded.sqm_max, stars_median = excluded.stars_median,
+			 stars_max = excluded.stars_max, sample_count = excluded.sample_count,
+			 dark_start = excluded.dark_start, dark_end = excluded.dark_end,
+			 source = excluded.source""",
+		(datetime.now(timezone.utc).isoformat(), night_date, site_id,
+		 sqm_median, sqm_min, sqm_max, stars_median, stars_max,
+		 sample_count, dark_start, dark_end, source),
+	)
+	conn.commit()

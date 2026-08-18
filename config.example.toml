@@ -37,6 +37,30 @@ firms_map_key = ""
 # Radius (km) around each site to search for active fires. Default 150.
 firms_radius_km = 150
 
+# OPTIONAL: nightly sky-quality capture from an indi-allsky camera at (or near)
+# one of your sites. Each morning astrowidget-allsky.timer pulls the finished
+# night's measured sky-brightness series from the camera's charts endpoint,
+# clips it to the night's astro-dark window, and logs one summary row into the
+# calibration DB (sky_readings) — an objective, measured counterpart to the
+# nightly "did you image?" form. Omit this whole block (and don't enable the
+# timer) if you have no allsky camera.
+#
+# NOTE on units: indi-allsky's "SQM" is a RELATIVE luminance metric
+# (exposure/gain-normalized), not calibrated mag/arcsec², unless the camera
+# owner calibrated it. Lower = darker. It's stored raw.
+#
+# [allsky]
+# url = "https://camera.example.com/indi-allsky"  # base URL of the indi-allsky web UI
+# site_id = "site_a"          # which [[sites]] id these readings belong to
+# camera_id = 2               # indi-allsky camera id (default 1)
+# timezone = "America/Phoenix"  # IANA zone of the CAMERA's clock — chart
+#                             # timestamps are time-of-day only, so this is how
+#                             # they're pinned to real instants (default UTC)
+# window_hours = 14           # history window per capture; must reach from the
+#                             # morning timer back past dusk (default 14, max 24)
+# insecure_tls = true         # accept a self-signed certificate (e.g. a camera
+#                             # on your own tailnet). Default false.
+
 # Open-Meteo is free and requires no key.
 [open_meteo]
 # Open-Meteo cloud-cover models for the multi-model ensemble. For in-coverage

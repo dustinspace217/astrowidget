@@ -13,7 +13,7 @@ identical clear ones), and prints a readiness verdict.
 It's the bridge to Part 4: instead of guessing when there's enough data, run this — and a
 weekly systemd timer can run it with --notify to ping you the moment it's worth a pass.
 
-    python grader/calibration_readiness.py [--site Bainbridge] [--min-nights 12] [--notify]
+    python grader/calibration_readiness.py [--site CSV] [--min-nights 12] [--notify]
 
 Re-tuning itself stays MANUAL and human-reviewed (it changes the verdicts you act on, so a
 human approves the weight changes) — this only tells you WHEN to ask.
@@ -44,7 +44,7 @@ def _band(cloud_score: int | None) -> str:
 	return "cloudy"
 
 
-def assess(conn, site_id: str = "Bainbridge",
+def assess(conn, site_id: str = "CSV",
 		   min_nights: int = 12, min_bands: int = 3) -> dict[str, Any]:
 	"""Summarize the joinable calibration data for a site.
 
@@ -110,7 +110,7 @@ def format_report(a: dict[str, Any]) -> str:
 
 def main() -> int:
 	ap = argparse.ArgumentParser(description="astrowidget calibration-readiness check")
-	ap.add_argument("--site", default="Bainbridge",
+	ap.add_argument("--site", default="CSV",
 					help="the calibration site (where forecasts, grades + decisions align)")
 	ap.add_argument("--min-nights", type=int, default=12,
 					help="joinable nights needed to call it ready (default 12)")

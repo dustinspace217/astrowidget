@@ -1,0 +1,15 @@
+[Unit]
+Description=astrowidget allsky sky-quality capture (nightly SQM from indi-allsky)
+Documentation=https://github.com/dustinspace217/astrowidget
+# Failure visibility: a failed capture is a silently-lost calibration night,
+# same stakes as the decision form — surface it as a desktop notification.
+# Fires every morning until the cause is fixed (re-surface until resolved).
+OnFailure=astrowidget-failure@%N.service
+
+[Service]
+# oneshot: pull the finished night's series, write one row, exit. The charts
+# endpoint serves the whole night in a single call, so nothing stays resident.
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/Claude/astrowidget/fetcher/allsky_sqm.py
+StandardOutput=journal
+StandardError=journal

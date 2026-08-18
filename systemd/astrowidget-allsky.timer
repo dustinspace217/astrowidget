@@ -1,0 +1,20 @@
+[Unit]
+Description=astrowidget allsky capture schedule (each morning, after astro dark ends)
+
+[Timer]
+# 08:00 machine-local. Astro dark at the CSV site ends ~05:20 (America/Phoenix,
+# no DST; the machine runs Pacific, which matches Phoenix in summer and is one
+# hour behind in winter — 08:00 Pacific is 08:00-09:00 Phoenix, always past
+# dawn). The [allsky] window_hours in config.toml must reach back from this
+# firing time to before the dark window starts: 14 h from 08:00 covers 18:00
+# onward, hours before dark begins year-round.
+OnCalendar=*-*-* 08:00:00
+# A machine asleep/off at 08:00 fires the capture at next boot. The charts
+# window still covers the night for a late-morning catch-up; a catch-up late
+# enough that the window no longer reaches the start of astro dark keeps the
+# reachable data, WARNS in the journal, and stores the truncated bounds so
+# the row never claims coverage it doesn't have. Only a total miss fails.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

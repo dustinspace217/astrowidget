@@ -198,7 +198,7 @@ def _restrict_to_dark(group: list[dict[str, Any]], dark_start: datetime,
 
 
 def grade_session(
-	folder: str, site_id: str = "Bainbridge",
+	folder: str, site_id: str = "CSV",
 	lat: float | None = None, lon: float | None = None,
 	target: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -551,7 +551,7 @@ def _count_fits(folder: str | Path) -> int:
 
 
 def grade_pending(
-	raws_root: str, site_id: str = "Bainbridge",
+	raws_root: str, site_id: str = "CSV",
 	lat: float | None = None, lon: float | None = None, write: bool = True,
 	since_days: int = 30, rigs: set[str] | None = None,
 	sites: list[dict[str, Any]] | None = None, force: bool = False,
@@ -710,7 +710,7 @@ def main() -> int:
 					help="fix every grade to this site id. For --scan, OMITTING it "
 						 "enables automatic per-session site attribution from FITS "
 						 "header coordinates (the timer's mode); single-folder mode "
-						 "defaults to Bainbridge.")
+						 "defaults to CSV.")
 	ap.add_argument("--lat", type=float, default=None, help="site latitude (for dawn-exclusion)")
 	ap.add_argument("--lon", type=float, default=None, help="site longitude (for dawn-exclusion)")
 	ap.add_argument("--write", action="store_true",
@@ -787,12 +787,13 @@ def main() -> int:
 			print(f"(dry run — {len(written)} grade(s) NOT written; pass --write)")
 		return 0
 
-	# Single-folder mode (manual grade of one session). --site keeps its historic
-	# Bainbridge default here — manual one-folder grades are the home-site remedy
-	# path (e.g. correcting a partial night), not the multi-site sweep.
+	# Single-folder mode (manual grade of one session). --site defaults to the
+	# HOME site (CSV since 2026-08; Bainbridge before) — manual one-folder grades
+	# are the home-site remedy path (e.g. correcting a partial night), not the
+	# multi-site sweep.
 	if not args.folder:
 		ap.error("provide a session folder, or use --scan RAWS_ROOT")
-	grades = grade_session(args.folder, args.site or "Bainbridge", args.lat, args.lon)
+	grades = grade_session(args.folder, args.site or "CSV", args.lat, args.lon)
 	if not grades:
 		print("No FITS subs found under", args.folder)
 		return 1

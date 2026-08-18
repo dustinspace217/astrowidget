@@ -13,9 +13,10 @@ OnFailure=astrowidget-failure@%N.service
 # NOT oneshot: the window persists until you answer (or close it), so the process
 # stays alive through your event loop. Default Type=simple.
 Type=simple
-# Logs tonight's image/no-image decision (Bainbridge) to the calibration DB. Pass
-# a different --site for another HOME site, or run additional instances.
-ExecStart=/usr/bin/python3 %h/Claude/astrowidget/forms/nightly_decision.py --site Bainbridge
+# Logs tonight's image/no-image decision (CSV — the scope's home since
+# 2026-08) to the calibration DB. Pass a different --site for another HOME
+# site, or run additional instances.
+ExecStart=/usr/bin/python3 %h/Claude/astrowidget/forms/nightly_decision.py --site CSV
 StandardOutput=journal
 StandardError=journal
 # If the display env isn't present in the user manager, the form can't open;

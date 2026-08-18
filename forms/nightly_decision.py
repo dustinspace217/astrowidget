@@ -17,7 +17,7 @@ Built on tkinter (Python stdlib) — NO new dependency. The rich desktop dashboa
 uses Qt/QML, but this simple yes/no form doesn't warrant forcing a PySide6 install
 on Linux (where the desktop app runs on the system `qml` runtime, not PySide6).
 
-Run manually with:  python forms/nightly_decision.py [--site Bainbridge]
+Run manually with:  python forms/nightly_decision.py [--site CSV]
 The scheduler (systemd timer / Task Scheduler / launchd) runs the same command.
 """
 
@@ -204,7 +204,7 @@ class DecisionForm:
 def main() -> int:
 	ap = argparse.ArgumentParser(description="astrowidget nightly decision form")
 	ap.add_argument(
-		"--site", default="Bainbridge",
+		"--site", default="CSV",
 		help="site id to log a decision for (the HOME site you image yourself)",
 	)
 	args = ap.parse_args()

@@ -20,8 +20,8 @@ three writers share, with the join built in, and durable across the weeks of
 accumulation the re-tune needs.
 
 NOTE on scope (2026-06-03, per Dustin): decisions + FITS grading focus on the
-HOME site (Bainbridge through 2026-08, CSV — Chiricahua Sky Village — since
-the scope moved; the one he can directly verify). The forecast log records
+HOME site (the site id "Bainbridge" through 2026-08, "CSV" since the scope
+moved; the one he can directly verify). The forecast log records
 ALL configured sites, because it's free (the scores are already computed) and a
 complete record is more useful later; the join simply only has decision/grade rows
 for the sites we actually label.

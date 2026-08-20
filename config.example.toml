@@ -53,7 +53,7 @@ firms_radius_km = 150
 # url = "https://camera.example.com/indi-allsky"  # base URL of the indi-allsky web UI
 # site_id = "site_a"          # which [[sites]] id these readings belong to
 # camera_id = 2               # indi-allsky camera id (default 1)
-# timezone = "America/Phoenix"  # IANA zone of the CAMERA's clock — chart
+# timezone = "America/Denver"  # IANA zone of the CAMERA's clock — chart
 #                             # timestamps are time-of-day only, so this is how
 #                             # they're pinned to real instants (default UTC)
 # window_hours = 14           # history window per capture; must reach from the

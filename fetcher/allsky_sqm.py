@@ -112,9 +112,9 @@ def resolve_sample_times(samples: list[dict], now_local: datetime) -> list[tuple
 		# not from 24 hours ago.
 		# DST note (QA TA-6/CR-7): replace() resolves ambiguous or nonexistent
 		# wall times as fold=0, so a camera zone WITH DST gets up to 1 h error
-		# twice a year at the transition edges. The supported deployment
-		# (America/Phoenix) has no DST; accepting that beats special-casing
-		# transitions the configured zone can never produce.
+		# twice a year at the transition edges; DST-free zones are immune.
+		# Accepted: a bounded twice-a-year edge error beats special-casing
+		# transitions, and allsky cameras commonly run DST-free clocks anyway.
 		if t > now_local + timedelta(seconds=60):
 			t -= timedelta(days=1)
 		out.append((t.astimezone(timezone.utc), float(y)))
@@ -175,7 +175,7 @@ def load_allsky_config() -> dict:
 	except Exception:
 		raise SystemExit(_fail(
 			f"[allsky] timezone '{tz_name}' is not an IANA zone name "
-			"(e.g. 'America/Phoenix')."))
+			"(e.g. 'America/Denver')."))
 	window = allsky.get("window_hours", 14)
 	if not isinstance(window, int) or not (1 <= window <= MAX_WINDOW_HOURS):
 		raise SystemExit(_fail(
@@ -238,8 +238,9 @@ def main() -> int:
 	# same convention every other calibration writer uses (log_run keys from
 	# the dark start in machine time; the decision form from machine "now") —
 	# keying from the camera's zone instead would diverge between the two
-	# zones' noons (an hour a day in winter for Phoenix-vs-Pacific, reachable
-	# via the timer's Persistent= boot catch-up) and orphan the night.
+	# zones' noons whenever their offsets differ (an hour a day per hour of
+	# offset gap, reachable via the timer's Persistent= boot catch-up) and
+	# orphan the night.
 	night_date = cl.observing_date(now_utc.astimezone())
 
 	conn = cl.connect()

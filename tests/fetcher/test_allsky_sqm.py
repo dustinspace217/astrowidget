@@ -18,6 +18,9 @@ import pytest
 import allsky_sqm
 import calibration_log as cl
 
+# Test camera zone: needs a REAL, nonzero UTC offset (so offset conversion is
+# actually exercised — UTC would make it vanish) and NO DST (so tests pass on
+# transition days). America/Phoenix is the canonical zone with both properties.
 PHX = ZoneInfo("America/Phoenix")
 
 
@@ -212,8 +215,8 @@ def test_iso_to_utc_z_suffix():
 
 def test_iso_to_utc_naive_is_utc_not_machine_local():
 	# A naive string is the fetcher's UTC convention. Treating it as machine-
-	# local would silently shift the clip window by the UTC offset (7-8 h on
-	# a Pacific machine) — the exact slip TA-1 flagged as green-under-revert.
+	# local would silently shift the clip window by the machine's whole UTC
+	# offset — the exact slip TA-1 flagged as green-under-revert.
 	assert allsky_sqm._iso_to_utc("2026-08-18T03:26:57") == datetime(
 		2026, 8, 18, 3, 26, 57, tzinfo=timezone.utc)
 

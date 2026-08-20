@@ -50,20 +50,12 @@ import 'retention.dart'; // retention-v2 composite — both bands (2026-07-01)
 // factors (display), vetoes, and windows; the wrapper owns the score.
 const String _nbMethod = 'retention-v2';
 
-/// Equipment-protection precipitation veto: fires when the PEAK (maximum)
-/// precipitation probability across the exposure (sunset→sunrise) window
-/// exceeds [threshold].
-///
-/// Deliberately different from VetoEvaluator.checkPrecipitation, which AVERAGES
-/// over the window. For protecting an uncovered scope the user wants "basically
-/// any real chance of rain" to trigger, so a single high-probability hour
-/// vetoes the night even when the window average is low. Returns null (no veto)
-/// for an empty window. (astrowidget requirement 2026-05-28.)
 /// Peak (maximum) precipitation probability across [hours]; 0.0 for an empty
-/// window. This single value feeds BOTH the equipment-protection veto and the
-/// widget's per-night precip display, so the two always agree on "the overnight
-/// rain risk" — fixing the earlier mismatch where the veto used the peak but the
-/// display showed a dark-window average. (astrowidget 2026-05-30.)
+/// window. Callers pass the REMAINING (not-yet-elapsed) exposure hours — see
+/// _remainingHours. This single value feeds BOTH the equipment-protection veto
+/// and the widget's per-night precip display, so the two always agree on "the
+/// overnight rain risk" — fixing the earlier mismatch where the veto used the
+/// peak but the display showed a dark-window average. (astrowidget 2026-05-30.)
 double _peakPrecipPct(List<HourlyWeather> hours) {
 	double peak = 0.0;
 	for (final h in hours) {
@@ -78,6 +70,38 @@ double _peakPrecipPct(List<HourlyWeather> hours) {
 	return peak;
 }
 
+/// The subset of [hours] not already in the past at [nowUtc] — the night
+/// AHEAD of the observer, which is what the equipment vetoes protect.
+///
+/// WHY (2026-08-20 CSV incident): the vetoes used to evaluate the WHOLE
+/// sunset→sunrise / dark window, so a mid-night fetch still counted evening
+/// hours that had already elapsed — a 27% shower that had long passed kept
+/// vetoing a clear remaining night until sunrise. Past weather either
+/// happened or didn't; no veto can protect against it. The hour row whose
+/// START is the hour containing [nowUtc] is KEPT (rows are hour-start
+/// stamps, so that row is partly ahead — conservative protection).
+///
+/// Factor scores and windows deliberately still cover the whole night: they
+/// describe the night's quality; the HOURLY equipment vetoes (precip, wind,
+/// condensation) are what's forward-looking. The cloud VETO is the one
+/// exception — it stays factor-based (whole-night viability, ≤5 = solid
+/// overcast), because it asks "is the night imageable", not "is the gear at
+/// risk in the hours ahead".
+List<HourlyWeather> _remainingHours(List<HourlyWeather> hours, DateTime nowUtc) {
+	final currentHour =
+		DateTime.utc(nowUtc.year, nowUtc.month, nowUtc.day, nowUtc.hour);
+	return hours.where((h) => !h.time.isBefore(currentHour)).toList();
+}
+
+/// Equipment-protection precipitation veto: fires when the PEAK (maximum)
+/// precipitation probability across the REMAINING exposure (sunset→sunrise)
+/// hours exceeds [threshold] (see _remainingHours for why remaining-only).
+///
+/// Deliberately different from VetoEvaluator.checkPrecipitation, which AVERAGES
+/// over the window. For protecting an uncovered scope the user wants "basically
+/// any real chance of rain" to trigger, so a single high-probability hour
+/// vetoes the night even when the window average is low. Returns null (no veto)
+/// for an empty window. (astrowidget requirement 2026-05-28.)
 VetoResult? _peakPrecipVeto(List<HourlyWeather> hours, double threshold) {
 	if (hours.isEmpty) return null;
 	final peak = _peakPrecipPct(hours);
@@ -351,6 +375,7 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 		final referenceDate = anchor.add(Duration(days: offset));
 		nights.add(_scoreOneNight(
 			referenceDate: referenceDate,
+			nowUtc: nowUtc,
 			label: ['Tonight', '+1 night', '+2 nights'][offset],
 			forecast: forecast,
 			lat: lat,
@@ -379,6 +404,7 @@ Map<String, dynamic> _scoreOneSite(Map<String, dynamic> site, DateTime nowUtc) {
 /// BB/NB/Neither recommendation plus the per-night 'scoring' audit block.
 Map<String, dynamic> _scoreOneNight({
 	required DateTime referenceDate,
+	required DateTime nowUtc,
 	required String label,
 	required WeatherForecast forecast,
 	required double lat,
@@ -496,10 +522,17 @@ Map<String, dynamic> _scoreOneNight({
 		).toList()
 		: windowHours; // fallback to imaging window if no sunset/sunrise found
 
-	// Peak overnight rain chance over the exposure window — the SAME number the
-	// precip veto tests, surfaced so the widget display matches the veto (PEAK,
-	// not the dark-window average the display previously computed).
-	final precipPeakPct = _peakPrecipPct(exposureHours);
+	// The vetoes (and the peak they display) look only at the REMAINING night —
+	// hours not already elapsed at nowUtc (see _remainingHours; 2026-08-20 CSV
+	// incident: a passed evening shower kept vetoing a clear night). For the
+	// +1/+2 nights the windows are entirely in the future, so this is a no-op.
+	final remainingExposureHours = _remainingHours(exposureHours, nowUtc);
+	final remainingWindowHours = _remainingHours(windowHours, nowUtc);
+
+	// Peak overnight rain chance over the remaining exposure window — the SAME
+	// number the precip veto tests, surfaced so the widget display matches the
+	// veto (PEAK, not the dark-window average the display previously computed).
+	final precipPeakPct = _peakPrecipPct(remainingExposureHours);
 
 	// Build the veto list. We deliberately do NOT call VetoEvaluator.evaluateAll
 	// because its precipitation check averages over the window — we want a
@@ -516,11 +549,15 @@ Map<String, dynamic> _scoreOneNight({
 	// covers viability). This is the concrete HOME/REMOTE behavioural split.
 	// Wind uses a PEAK check (_peakWindVeto) rather than the engine's average,
 	// for the same reason precip does — see the veto's doc comment.
+	// All three hourly equipment vetoes evaluate the REMAINING hours only —
+	// wind and condensation for the same reason as precip: a gusty or damp
+	// stretch that already passed can't harm the scope in the night ahead.
+	// The cloud veto stays factor-based (whole-night viability, not equipment).
 	final VetoResult? firedVeto =
 		VetoEvaluator.checkCloud(loc.factorScores['cloud'] ?? 0) ??
-		(managed ? null : _peakPrecipVeto(exposureHours, precipMaxPct)) ??
-		_peakWindVeto(windowHours, windMaxKmh) ??
-		VetoEvaluator.checkCondensation(windowHours, dewSpreadMinC);
+		(managed ? null : _peakPrecipVeto(remainingExposureHours, precipMaxPct)) ??
+		_peakWindVeto(remainingWindowHours, windMaxKmh) ??
+		VetoEvaluator.checkCondensation(remainingWindowHours, dewSpreadMinC);
 	final vetoes = firedVeto == null
 		? const <Map<String, String>>[]
 		: <Map<String, String>>[{'name': firedVeto.vetoName, 'reason': firedVeto.reason}];

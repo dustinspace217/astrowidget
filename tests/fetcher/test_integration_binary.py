@@ -99,10 +99,16 @@ def _cfg():
 	}
 
 
-def _run_with_precip(tmp_path, precip_for_hour):
+def _run_with_precip(tmp_path, precip_for_hour, night_index=0):
 	"""Runs the full pipeline with a custom per-hour precip-probability pattern
-	and returns tonight's night dict. `precip_for_hour(i)` returns the precip
-	probability for hour index i (i=0 is 2026-05-29T00:00 UTC)."""
+	and returns the night dict at `night_index` (0=Tonight, 1=+1 night).
+	`precip_for_hour(i)` returns the precip probability for hour index i
+	(i=0 is midnight UTC today).
+
+	NOTE this harness runs fx.main(), so now_utc is the REAL wall clock — a
+	test whose assertion depends on where "now" falls inside Tonight's window
+	must either use night_index=1 (always fully in the future) or the
+	controlled-now _run_binary_direct harness below."""
 	def om(lat, lon):
 		h = {"time": [_iso(i) for i in range(_N)]}
 		for k, v in {
@@ -125,7 +131,7 @@ def _run_with_precip(tmp_path, precip_for_hour):
 		 patch.object(fx, "_notify", lambda *a, **k: None):
 		fx.main()
 	state = json.loads((tmp_path / "state.json").read_text())
-	return state["sites"][0]["nights"][0]
+	return state["sites"][0]["nights"][night_index]
 
 
 def _precip_vetoed(night) -> bool:
@@ -155,8 +161,15 @@ def test_overnight_rain_peak_vetoes(tmp_path):
 	otherwise → precipitation veto fires. Proves PEAK (not average) over the
 	sunset→sunrise exposure window: one risky overnight hour triggers
 	protection even though the window average is tiny.
+
+	Asserted on the +1 NIGHT: its window is always entirely in the future, so
+	the remaining-night clamp (vetoes ignore already-elapsed hours,
+	2026-08-20) never touches the spike regardless of when the suite runs.
+	Tonight's spike may already be in the past mid-night — that behavior has
+	its own controlled-now tests below.
 	"""
-	night = _run_with_precip(tmp_path, lambda i: 40 if (i % 24) == 8 else 0)
+	night = _run_with_precip(tmp_path, lambda i: 40 if (i % 24) == 8 else 0,
+							 night_index=1)
 	assert _precip_vetoed(night), "an overnight rain-chance peak must veto"
 	assert night["recommendation"] == "Neither"
 	# Step 5 end-to-end: the binary emits the exposure-window PEAK (40), and the
@@ -165,6 +178,145 @@ def test_overnight_rain_peak_vetoes(tmp_path):
 	# precip_peak_pct, so the display and the veto agree on the same number.
 	assert night["precip_peak_pct"] == 40
 	assert night["displayFactors"]["precipPct"] == 40
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Direct-binary invocation with a CONTROLLED now_utc — the only way to test
+# behavior that depends on how much of the night has already elapsed (the
+# _run_with_precip harness runs fx.main(), whose now is the real wall clock).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Fixture calendar: 96 hours from 2026-04-10T00:00Z at the synthetic lat 45 /
+# lon -120 site (solar midnight ≈ 08:00Z). For the night of Apr 10→11:
+# sunset ≈ 02:45Z, astro dark ≈ 04:30Z→11:40Z, sunrise ≈ 13:25Z (Apr 11).
+_DB_START = datetime(2026, 4, 10, 0, 0, tzinfo=timezone.utc)
+
+
+def _run_binary_direct(now_utc_iso, precip_for_hour=None, override_for_hour=None):
+	"""Invoke the REAL scoring binary directly with a fully-controlled now_utc
+	and a custom per-hour precip pattern (index 0 = 2026-04-10T00:00Z).
+	`override_for_hour(i)` may return a dict merged over row i, for tests that
+	drive wind/dewpoint instead of precip. Returns tonight's night dict from
+	the binary's own output."""
+	precip_for_hour = precip_for_hour or (lambda i: 0)
+	hours = []
+	for i in range(96):
+		t = _DB_START + timedelta(hours=i)
+		row = {
+			"time": t.strftime("%Y-%m-%dT%H:%M:%S"),
+			"cloud_cover": 5, "cloud_cover_low": 0, "cloud_cover_mid": 0,
+			"cloud_cover_high": 5, "relative_humidity_2m": 60,
+			"temperature_2m": 12.0, "dewpoint_2m": 6.0,
+			"wind_speed_10m": 5, "wind_gusts_10m": 8,
+			"precipitation_probability": precip_for_hour(i),
+			"precipitation": 0, "visibility": 24000,
+		}
+		if override_for_hour:
+			row.update(override_for_hour(i) or {})
+		hours.append(row)
+	payload = {"now_utc": now_utc_iso, "sites": [{
+		"id": "site_a", "label": "Test Site", "lat": 45.0, "lon": -120.0,
+		"thresholds": {}, "hourly": hours, "bortle": 4, "nb_leakage": 0.38,
+		"managed": False, "airQuality": [], "firesNearby": None,
+	}]}
+	proc = subprocess.run(
+		[str(fx.SCORING_BINARY)], input=json.dumps(payload).encode(),
+		capture_output=True, timeout=120)
+	assert proc.returncode == 0, proc.stderr.decode()
+	return json.loads(proc.stdout)["sites"][0]["nights"][0]
+
+
+# Evening rain (03-05Z ≈ twilight/early dark, inside sunset→sunrise) for the
+# Apr 10→11 night; bone dry after. Indices 27-29 = Apr 11 03:00-05:00Z.
+_EVENING_RAIN = lambda i: 60 if i in (27, 28, 29) else 0  # noqa: E731
+
+
+def test_past_rain_hours_do_not_veto_the_remaining_night():
+	"""
+	THE 2026-08-20 CSV incident: a 27% evening shower had already PASSED when
+	the 1 AM fetch ran, the rest of the night was clear — and the veto still
+	warned about it until sunrise. Rain confined to hours that have already
+	elapsed at now_utc must neither veto nor appear as the displayed peak:
+	the veto protects the night AHEAD, and past rain either fell or didn't.
+	"""
+	night = _run_binary_direct("2026-04-11T09:00:00Z", _EVENING_RAIN)
+	assert not _precip_vetoed(night), \
+		"rain that already passed must not veto the clear remaining night"
+	assert night["precip_peak_pct"] == 0
+
+
+def test_upcoming_evening_rain_still_vetoes_at_sunset():
+	"""Control for the past-hours clamp: the SAME evening rain, evaluated just
+	after sunset while it is still ahead, must veto exactly as before."""
+	night = _run_binary_direct("2026-04-11T02:50:00Z", _EVENING_RAIN)
+	assert _precip_vetoed(night), "upcoming overnight rain must still veto"
+	assert night["precip_peak_pct"] == 60
+
+
+def test_rain_in_the_current_hour_still_vetoes():
+	"""The in-progress hour is NOT past: a fetch at 04:30Z with rain in the
+	04:00Z hour row must keep the veto (conservative equipment protection —
+	the hour containing 'now' is partly ahead)."""
+	night = _run_binary_direct("2026-04-11T04:30:00Z",
+							   lambda i: 60 if i == 28 else 0)
+	assert _precip_vetoed(night), "the hour containing now must still count"
+	assert night["precip_peak_pct"] == 60
+
+
+def test_hour_boundary_drop_and_keep_sides():
+	"""Pins the clamp's hour boundary from BOTH sides (QA VTA-2): at exactly
+	05:00:00Z the 04:00Z row is one full hour old → dropped; at exactly
+	04:00:00Z the 04:00Z row IS the current hour → kept. A clamp loosened by
+	one hour ("keep the previous hour too") goes red on the drop side."""
+	rain_at_28 = lambda i: 60 if i == 28 else 0  # noqa: E731
+	dropped = _run_binary_direct("2026-04-11T05:00:00Z", rain_at_28)
+	assert not _precip_vetoed(dropped)
+	assert dropped["precip_peak_pct"] == 0
+	kept = _run_binary_direct("2026-04-11T04:00:00Z", rain_at_28)
+	assert _precip_vetoed(kept)
+	assert kept["precip_peak_pct"] == 60
+
+
+def _vetoed_by(night, name) -> bool:
+	"""True if a veto with this name fired for the night."""
+	return any(v.get("name") == name
+			   for v in night.get("broadband", {}).get("vetoes", []))
+
+
+def test_past_wind_does_not_veto_but_upcoming_wind_does():
+	"""The wind clamp, pinned from both sides (QA VTA-1: reverting the wind
+	veto to whole-window hours while keeping the precip clamp must go red).
+	60 km/h (over the 40 default) at 05-06Z inside the dark window: already
+	past at 09:00Z → no veto; still ahead at 04:30Z → veto."""
+	gusty_early = lambda i: {"wind_speed_10m": 60} if i in (29, 30) else None  # noqa: E731
+	calm_rest = _run_binary_direct("2026-04-11T09:00:00Z",
+								   override_for_hour=gusty_early)
+	assert not _vetoed_by(calm_rest, "wind"), \
+		"a gust front that already passed must not veto the calm remainder"
+	ahead = _run_binary_direct("2026-04-11T04:30:00Z",
+							   override_for_hour=gusty_early)
+	assert _vetoed_by(ahead, "wind"), "upcoming over-threshold wind must veto"
+
+
+def test_past_dew_hours_do_not_drag_the_condensation_average():
+	"""The condensation clamp (QA VTA-1). Condensation is an AVERAGE veto, so
+	the pin is about the average's population: wet early hours (spread 0°C at
+	05-07Z) pull the WHOLE-window average to ~1.14°C (< the 1.5 default) while
+	the remaining hours alone average 2.0°C (>= threshold). Evaluated mid-night
+	at 08:00Z the passed wet hours must be excluded → no veto; evaluated at
+	04:30Z with the wet stretch still ahead → veto."""
+	def dew(i):
+		if i in (29, 30, 31):
+			return {"dewpoint_2m": 12.0}   # spread 0.0 — condensation-wet
+		if 32 <= i <= 35:
+			return {"dewpoint_2m": 10.0}   # spread 2.0 — safely dry
+		return None
+	later = _run_binary_direct("2026-04-11T08:00:00Z", override_for_hour=dew)
+	assert not _vetoed_by(later, "condensation"), \
+		"passed damp hours must not drag the remaining night's average under"
+	ahead = _run_binary_direct("2026-04-11T04:30:00Z", override_for_hour=dew)
+	assert _vetoed_by(ahead, "condensation"), \
+		"an upcoming damp stretch must still veto"
 
 
 def test_real_binary_pipeline_surfaces_astrospheric_and_tags(tmp_path):

@@ -78,7 +78,13 @@ CREATE TABLE IF NOT EXISTS forecasts (
     transparency    INTEGER,
     moon_illum      REAL,
     moon_alt        REAL,
-    precip_peak_pct INTEGER,
+    precip_peak_pct INTEGER,     -- since 2026-08-20: peak over the REMAINING
+                                 -- (not-yet-elapsed) exposure hours at fetch
+                                 -- time. Identical to the whole-night peak for
+                                 -- pre-dark fetches (the ones calibration
+                                 -- queries use); mid-night fetch rows reflect
+                                 -- only the night still ahead. Earlier rows
+                                 -- are whole-night peaks.
     best_window_start TEXT,          -- NULL when no clear window
     best_window_end   TEXT,
     managed         INTEGER,         -- 0/1

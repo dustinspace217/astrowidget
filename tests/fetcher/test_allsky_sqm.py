@@ -75,8 +75,12 @@ def test_resolve_times_drops_malformed_points():
 def test_clip_to_window_is_inclusive():
 	base = datetime(2026, 8, 18, 4, 0, 0, tzinfo=timezone.utc)
 	pts = [(base + timedelta(hours=h), float(h)) for h in range(5)]
-	assert allsky_sqm.clip_to_window(pts, base + timedelta(hours=1),
-									 base + timedelta(hours=3)) == [1.0, 2.0, 3.0]
+	clipped = allsky_sqm.clip_to_window(pts, base + timedelta(hours=1),
+										base + timedelta(hours=3))
+	assert [y for (_, y) in clipped] == [1.0, 2.0, 3.0]
+	# Pairs come back with their times intact — the caller's coverage-gap
+	# check depends on them.
+	assert clipped[0][0] == base + timedelta(hours=1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -165,24 +169,37 @@ def _patch_config(monkeypatch, cfg):
 
 def test_config_happy_path_applies_defaults(monkeypatch):
 	_patch_config(monkeypatch, _cfg(
-		{"url": "https://cam.example/indi-allsky/", "site_id": "CSV"}))
+		{"url": "https://cam.example/indi-allsky/", "site_id": "CSV",
+		 "timezone": "America/Denver"}))
 	acfg = allsky_sqm.load_allsky_config()
 	assert acfg["url"] == "https://cam.example/indi-allsky"  # trailing / stripped
 	assert acfg["camera_id"] == 1 and acfg["window_hours"] == 14
 	assert acfg["insecure_tls"] is False
-	assert str(acfg["tz"]) == "UTC"
+	assert str(acfg["tz"]) == "America/Denver"
+
+
+_TZ = {"timezone": "America/Denver"}  # valid zone for the bad-block cases below
 
 
 @pytest.mark.parametrize("allsky", [
 	None,                                              # block missing entirely
-	{"site_id": "CSV"},                                # no url
-	{"url": "ftp://x", "site_id": "CSV"},              # non-http(s) url
-	{"url": "https://x", "site_id": ""},               # empty site
-	{"url": "https://x", "site_id": "nope"},           # site not in [[sites]]
+	{"site_id": "CSV", **_TZ},                         # no url
+	{"url": "ftp://x", "site_id": "CSV", **_TZ},       # non-http(s) url
+	{"url": "https://x", "site_id": "", **_TZ},        # empty site
+	{"url": "https://x", "site_id": "nope", **_TZ},    # site not in [[sites]]
+	{"url": "https://x", "site_id": "CSV"},            # timezone MISSING — it is
+	                                                   # required: samples are
+	                                                   # uninterpretable without it
 	{"url": "https://x", "site_id": "CSV", "timezone": "PDT"},        # not IANA
-	{"url": "https://x", "site_id": "CSV", "window_hours": 0},        # too small
-	{"url": "https://x", "site_id": "CSV", "window_hours": 48},       # over cap
-	{"url": "https://x", "site_id": "CSV", "camera_id": -1},          # bad camera
+	{"url": "https://x", "site_id": "CSV", **_TZ, "window_hours": 0},   # too small
+	{"url": "https://x", "site_id": "CSV", **_TZ, "window_hours": 24},  # over the
+	                                                   # 23 h cap (24 h would make
+	                                                   # date reconstruction ambiguous)
+	{"url": "https://x", "site_id": "CSV", **_TZ, "window_hours": True}, # TOML true
+	                                                   # is a bool; isinstance(True,
+	                                                   # int) is True — must reject
+	{"url": "https://x", "site_id": "CSV", **_TZ, "camera_id": -1},     # bad camera
+	{"url": "https://x", "site_id": "CSV", **_TZ, "camera_id": True},   # bool camera
 ])
 def test_config_rejects_bad_blocks(monkeypatch, allsky):
 	_patch_config(monkeypatch, _cfg(allsky) if allsky is not None
@@ -197,7 +214,8 @@ def test_config_site_id_canonicalized_to_sites_casing(monkeypatch):
 	# UNIQUE(night_date, site_id) is case-sensitive, so writing the [allsky]
 	# block's own casing would split one night across two rows (QA TA-4/SA-2,
 	# confirmed empirically: "CSV" then "csv" upserts produced two rows).
-	_patch_config(monkeypatch, _cfg({"url": "https://x", "site_id": "csv"}))
+	_patch_config(monkeypatch, _cfg(
+		{"url": "https://x", "site_id": "csv", "timezone": "America/Denver"}))
 	assert allsky_sqm.load_allsky_config()["site_id"] == "CSV"
 
 
@@ -250,10 +268,16 @@ def _z_iso(dt_utc):
 	return dt_utc.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-def _run_main(monkeypatch, payload, dark_offsets=(-6, 1)):
+def _run_main(monkeypatch, payload, dark_offsets=(-10, -2)):
 	"""Run main() with a canned config, a seeded dark window (now+offsets, in
 	hours, stored in the production "Z" shape), and a patched charts fetch.
-	Returns (exit_code, connection)."""
+	Returns (exit_code, connection).
+
+	Default offsets put the dark window ENTIRELY IN THE PAST — the real morning
+	scenario the timer fires (multimodel review, Kimi: the old (-6, +1) default
+	made every "morning" test secretly a mid-night test, so the normal
+	stored-bounds-equal-forecast case had zero coverage). The mid-night case is
+	exercised explicitly by test_main_mid_night_run_stores_clipped_end."""
 	monkeypatch.setattr(allsky_sqm, "load_allsky_config", lambda: {
 		"url": "https://cam.example/indi-allsky", "site_id": "CSV",
 		"camera_id": 2, "tz": PHX, "window_hours": 14, "insecure_tls": False,
@@ -272,20 +296,38 @@ def _run_main(monkeypatch, payload, dark_offsets=(-6, 1)):
 	return allsky_sqm.main(), conn
 
 
-def test_main_writes_stats_for_dark_window_samples(monkeypatch):
+def test_main_writes_stats_for_dark_window_samples(monkeypatch, capsys):
 	now_utc = datetime.now(timezone.utc)
-	# Three samples inside the dark window, one daytime sample far outside it
-	# (huge value, like the real daytime series) that MUST be clipped away.
-	sqm = [{"x": _phx_hms(now_utc - timedelta(hours=h)), "y": v}
-		   for h, v in ((5, 1300.0), (4, 1400.0), (3, 1500.0))]
+	# Five samples spanning the WHOLE dark window (within the 30 min edge
+	# allowance — this is the genuinely-happy path, so the edge-gap warning
+	# must stay silent; stabilization QA STA-1), plus one daytime sample far
+	# outside it (huge value, like the real daytime series) that MUST be
+	# clipped away.
+	sqm = [{"x": _phx_hms(now_utc - timedelta(minutes=m)), "y": v}
+		   for m, v in ((595, 1300.0), (300, 1350.0), (240, 1400.0),
+						(180, 1450.0), (125, 1500.0))]
 	sqm.append({"x": _phx_hms(now_utc - timedelta(hours=13)), "y": 4_000_000.0})
 	stars = [{"x": _phx_hms(now_utc - timedelta(hours=4)), "y": 900}]
 	rc, conn = _run_main(monkeypatch, {"chart_data": {"sqm": sqm, "stars": stars}})
 	assert rc == 0
+	# Full coverage → no cry-wolf: the gap warning must NOT fire (pins the
+	# 30 min threshold from the quiet side; a threshold mutated to always-warn
+	# is alarm fatigue, the failure mode the warning exists to prevent).
+	assert "no samples for" not in capsys.readouterr().err
 	row = conn.execute("""SELECT sqm_median, sqm_min, sqm_max, stars_median,
 								 stars_max, sample_count, site_id
 						  FROM sky_readings""").fetchone()
-	assert row == (1400.0, 1300.0, 1500.0, 900.0, 900, 3, "CSV")
+	assert row == (1400.0, 1300.0, 1500.0, 900.0, 900, 5, "CSV")
+	# Morning run over a fully-past window: the stored bounds must equal the
+	# forecast's window (no clipping applied) — the normal-case pin the old
+	# mid-night-shaped default never provided (multimodel review, Kimi).
+	now_utc = datetime.now(timezone.utc)
+	ds, de = conn.execute(
+		"SELECT dark_start, dark_end FROM sky_readings").fetchone()
+	assert abs(datetime.fromisoformat(ds)
+			   - (now_utc - timedelta(hours=10))) < timedelta(seconds=10)
+	assert abs(datetime.fromisoformat(de)
+			   - (now_utc - timedelta(hours=2))) < timedelta(seconds=10)
 	conn.close()
 
 
@@ -303,7 +345,7 @@ def test_main_fails_loudly_without_dark_window(monkeypatch, capsys):
 def test_main_fails_loudly_on_missing_sqm_series(monkeypatch, capsys):
 	rc, conn = _run_main(monkeypatch, {"chart_data": {"stars": []}})
 	assert rc == 1
-	assert "no sqm series" in capsys.readouterr().err
+	assert "no sqm/jsqm series" in capsys.readouterr().err
 	assert conn.execute("SELECT COUNT(*) FROM sky_readings").fetchone() == (0,)
 	conn.close()
 
@@ -330,6 +372,20 @@ def test_main_succeeds_without_stars_series(monkeypatch):
 	row = conn.execute("""SELECT sqm_median, stars_median, stars_max
 						  FROM sky_readings""").fetchone()
 	assert row == (1400.0, None, None)
+	conn.close()
+
+
+def test_main_accepts_jsqm_series_key(monkeypatch):
+	# indi-allsky renamed the series "sqm" → "jsqm" in a 2026-08 server update
+	# (same metric, same scale — verified live). The capture must accept
+	# either key, or every camera-server upgrade kills the feature.
+	now_utc = datetime.now(timezone.utc)
+	jsqm = [{"x": _phx_hms(now_utc - timedelta(hours=4)), "y": 1234.0}]
+	rc, conn = _run_main(monkeypatch, {"chart_data": {"sqm": None,
+													  "jsqm": jsqm}})
+	assert rc == 0
+	assert conn.execute(
+		"SELECT sqm_median FROM sky_readings").fetchone() == (1234.0,)
 	conn.close()
 
 
@@ -396,6 +452,205 @@ def test_main_warns_and_clips_when_window_misses_dark_start(monkeypatch, capsys)
 	delta = abs(datetime.fromisoformat(stored_start)
 				- (now_utc - timedelta(hours=14)))
 	assert delta < timedelta(seconds=10)
+	conn.close()
+
+
+def test_main_afternoon_catchup_steps_back_to_finished_night(monkeypatch):
+	# After-noon boot catch-up (found independently by all three peer models in
+	# the 2026-08-20 multimodel review): past local noon the noon-to-noon key
+	# names TODAY's night, whose dark window is still in the future. main()
+	# must detect the future window and step back one day to the finished,
+	# recoverable night instead of failing on a night that hasn't happened.
+	monkeypatch.setattr(allsky_sqm, "load_allsky_config", lambda: {
+		"url": "https://cam.example/indi-allsky", "site_id": "CSV",
+		"camera_id": 2, "tz": PHX, "window_hours": 14, "insecure_tls": False,
+	})
+	now_utc = datetime.now(timezone.utc)
+	sqm = [{"x": _phx_hms(now_utc - timedelta(hours=4)), "y": 1375.0}]
+	monkeypatch.setattr(allsky_sqm, "fetch_charts",
+						lambda *a, **k: {"chart_data": {"sqm": sqm}})
+	tonight = cl.observing_date(datetime.now().astimezone())
+	last_night = (datetime.fromisoformat(tonight)
+				  - timedelta(days=1)).date().isoformat()
+	conn = cl.connect()
+	# Tonight's window: entirely in the FUTURE (the after-noon shape).
+	_seed_forecast(conn, tonight, "CSV",
+				   _z_iso(now_utc + timedelta(hours=5)),
+				   _z_iso(now_utc + timedelta(hours=9)))
+	# Last night's window: finished, and the sample falls inside it.
+	_seed_forecast(conn, last_night, "CSV",
+				   _z_iso(now_utc - timedelta(hours=10)),
+				   _z_iso(now_utc - timedelta(hours=2)))
+	assert allsky_sqm.main() == 0
+	rows = conn.execute(
+		"SELECT night_date, sqm_median FROM sky_readings").fetchall()
+	assert rows == [(last_night, 1375.0)]
+	conn.close()
+
+
+def test_main_narrower_rerun_never_replaces_wider_row(monkeypatch, capsys):
+	# Coverage-regression guard (multimodel review, Sol): a manual re-run
+	# whose clip window covers LESS night than the row already stored must
+	# leave the wider row untouched — "newest wins" only when it's not worse.
+	existing_conn = cl.connect()
+	now_utc = datetime.now(timezone.utc)
+	night = cl.observing_date(datetime.now().astimezone())
+	cl.upsert_sky_reading(
+		existing_conn, night, "CSV", 1390.0, 1250.0, 2900.0, 990.0, 1080, 700,
+		(now_utc - timedelta(hours=11)).isoformat(),
+		(now_utc - timedelta(hours=2)).isoformat(),  # 9 h of coverage
+		"http://x")
+	existing_conn.close()
+	# New run: dark window seeded to a 4 h span → narrower than the 9 h row.
+	sqm = [{"x": _phx_hms(now_utc - timedelta(hours=3)), "y": 9999.0}]
+	rc, conn = _run_main(monkeypatch, {"chart_data": {"sqm": sqm}},
+						 dark_offsets=(-6, -2))
+	assert rc == 0
+	assert "keeping it, nothing written" in capsys.readouterr().out
+	row = conn.execute(
+		"SELECT sqm_median, sample_count FROM sky_readings").fetchone()
+	assert row == (1390.0, 700)  # the wide row survived; 9999 never landed
+	conn.close()
+
+
+def test_main_warns_on_coverage_gap_at_window_edge(monkeypatch, capsys):
+	# Edge-gap warning (multimodel review, Sol): a camera down from dusk until
+	# late still yields a valid row, but the hole must be loud in the journal —
+	# a quiet outage must not read as a quiet night.
+	now_utc = datetime.now(timezone.utc)
+	# Window is 8 h; the only samples sit in the final hour → huge start gap.
+	sqm = [{"x": _phx_hms(now_utc - timedelta(hours=2, minutes=m)), "y": 1400.0}
+		   for m in range(0, 50, 10)]
+	rc, conn = _run_main(monkeypatch, {"chart_data": {"sqm": sqm}},
+						 dark_offsets=(-10, -2))
+	assert rc == 0
+	assert "no samples for" in capsys.readouterr().err
+	conn.close()
+
+
+def test_main_equal_bounds_rerun_replaces(monkeypatch):
+	# The tie side of the regression guard (stabilization QA STA-2/SCR-2):
+	# equal bounds are NOT strictly contained, so a same-morning corrected
+	# re-run must REPLACE — a guard mutated to block ties would silently pin
+	# the first (possibly wrong) capture forever.
+	now_utc = datetime.now(timezone.utc)
+	sqm1 = [{"x": _phx_hms(now_utc - timedelta(hours=4)), "y": 1300.0}]
+	rc, conn = _run_main(monkeypatch, {"chart_data": {"sqm": sqm1}})
+	assert rc == 0
+	conn.close()
+	sqm2 = [{"x": _phx_hms(now_utc - timedelta(hours=4)), "y": 1444.0}]
+	rc, conn = _run_main(monkeypatch, {"chart_data": {"sqm": sqm2}})
+	assert rc == 0
+	assert conn.execute(
+		"SELECT sqm_median FROM sky_readings").fetchone() == (1444.0,)
+	conn.close()
+
+
+def test_main_overwrites_row_with_unparseable_bounds(monkeypatch):
+	# Guard fall-through (stabilization QA STA-3/SCR-4, converged): a stored
+	# row with garbage bounds can't be compared, so the fresh capture — whose
+	# bounds are good — must overwrite it, not be blocked defensively.
+	conn0 = cl.connect()
+	night = cl.observing_date(datetime.now().astimezone())
+	cl.upsert_sky_reading(conn0, night, "CSV", 1.0, 1.0, 1.0, None, None, 1,
+						  "garbage", "also-garbage", "http://x")
+	conn0.close()
+	now_utc = datetime.now(timezone.utc)
+	sqm = [{"x": _phx_hms(now_utc - timedelta(hours=4)), "y": 1380.0}]
+	rc, conn = _run_main(monkeypatch, {"chart_data": {"sqm": sqm}})
+	assert rc == 0
+	assert conn.execute(
+		"SELECT sqm_median FROM sky_readings").fetchone() == (1380.0,)
+	conn.close()
+
+
+def test_main_prefers_sqm_over_jsqm_and_skips_empty_lists(monkeypatch):
+	# Series-key lookup order pinned (stabilization QA STA-4): "sqm" wins when
+	# both are populated (deterministic choice), and an EMPTY sqm list falls
+	# through to jsqm — after the live rename, an empty legacy list is the
+	# likelier future server shape than a null.
+	now_utc = datetime.now(timezone.utc)
+	pt = lambda v: [{"x": _phx_hms(now_utc - timedelta(hours=4)), "y": v}]  # noqa: E731
+	rc, conn = _run_main(monkeypatch, {"chart_data": {"sqm": pt(1111.0),
+													  "jsqm": pt(2222.0)}})
+	assert rc == 0
+	assert conn.execute(
+		"SELECT sqm_median FROM sky_readings").fetchone() == (1111.0,)
+	conn.close()
+	conn0 = cl.connect()
+	conn0.execute("DELETE FROM sky_readings")
+	conn0.commit()
+	conn0.close()
+	rc, conn = _run_main(monkeypatch, {"chart_data": {"sqm": [],
+													  "jsqm": pt(2222.0)}})
+	assert rc == 0
+	assert conn.execute(
+		"SELECT sqm_median FROM sky_readings").fetchone() == (2222.0,)
+	conn.close()
+
+
+def test_main_stepback_to_missing_night_fails_naming_it(monkeypatch, capsys):
+	# Step-back lands on a night with NO forecast row (stabilization QA
+	# STA-5): fetch outage yesterday + after-noon boot today. Must fail
+	# loudly, naming the STEPPED-BACK date so the journal points at the right
+	# night.
+	monkeypatch.setattr(allsky_sqm, "load_allsky_config", lambda: {
+		"url": "https://cam.example", "site_id": "CSV", "camera_id": 2,
+		"tz": PHX, "window_hours": 14, "insecure_tls": False,
+	})
+	monkeypatch.setattr(allsky_sqm, "fetch_charts",
+						lambda *a, **k: pytest.fail("must not fetch"))
+	now_utc = datetime.now(timezone.utc)
+	tonight = cl.observing_date(datetime.now().astimezone())
+	last_night = (datetime.fromisoformat(tonight)
+				  - timedelta(days=1)).date().isoformat()
+	conn = cl.connect()
+	_seed_forecast(conn, tonight, "CSV",
+				   _z_iso(now_utc + timedelta(hours=5)),
+				   _z_iso(now_utc + timedelta(hours=9)))
+	assert allsky_sqm.main() == 1
+	assert f"no dark window logged for {last_night}" in capsys.readouterr().err
+	conn.close()
+
+
+def test_main_no_stepback_on_missing_row(monkeypatch, capsys):
+	# The trigger boundary the comment promises (stabilization QA SCR-3):
+	# step-back fires ONLY on a future window, never on a missing row — a
+	# missing row for the resolved night is a fetch-outage failure even when
+	# last night's row exists and would have matched.
+	monkeypatch.setattr(allsky_sqm, "load_allsky_config", lambda: {
+		"url": "https://cam.example", "site_id": "CSV", "camera_id": 2,
+		"tz": PHX, "window_hours": 14, "insecure_tls": False,
+	})
+	monkeypatch.setattr(allsky_sqm, "fetch_charts",
+						lambda *a, **k: pytest.fail("must not fetch"))
+	now_utc = datetime.now(timezone.utc)
+	tonight = cl.observing_date(datetime.now().astimezone())
+	last_night = (datetime.fromisoformat(tonight)
+				  - timedelta(days=1)).date().isoformat()
+	conn = cl.connect()
+	# ONLY last night seeded — the resolved night has no row at all.
+	_seed_forecast(conn, last_night, "CSV",
+				   _z_iso(now_utc - timedelta(hours=30)),
+				   _z_iso(now_utc - timedelta(hours=22)))
+	assert allsky_sqm.main() == 1
+	assert f"no dark window logged for {tonight}" in capsys.readouterr().err
+	assert conn.execute("SELECT COUNT(*) FROM sky_readings").fetchone() == (0,)
+	conn.close()
+
+
+def test_main_fails_honestly_when_window_unreachable(monkeypatch, capsys):
+	# Wholly-unreachable night (stabilization QA SCR-1): the history window
+	# and the dark window don't overlap at all. Must fail with the real
+	# diagnosis before fetching — not the misleading "was the camera down?".
+	# (The empty payload below discriminates: if the pre-fetch check were
+	# deleted, main() would reach the series lookup and fail with the
+	# no-sqm/jsqm message instead, and the assertion goes red.)
+	rc, conn = _run_main(monkeypatch, {"chart_data": {}},
+						 dark_offsets=(-20, -15))  # 14 h window reaches -14 h
+	assert rc == 1
+	assert "no longer overlaps" in capsys.readouterr().err
+	assert conn.execute("SELECT COUNT(*) FROM sky_readings").fetchone() == (0,)
 	conn.close()
 
 

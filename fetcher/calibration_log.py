@@ -498,6 +498,20 @@ def latest_dark_window(conn: sqlite3.Connection, night_date: str,
 	return (row[0], row[1]) if row else None
 
 
+def get_sky_reading_bounds(conn: sqlite3.Connection, night_date: str,
+						   site_id: str) -> tuple[str, str] | None:
+	"""The (dark_start, dark_end) bounds already stored for a night+site, or
+	None if no row exists. Lets the capture refuse to REPLACE a wider row with
+	a narrower re-run (the coverage-regression guard) — the write helper stays
+	a dumb upsert; the policy lives with the caller."""
+	row = conn.execute(
+		"""SELECT dark_start, dark_end FROM sky_readings
+		   WHERE night_date = ? AND site_id = ? COLLATE NOCASE""",
+		(night_date, site_id),
+	).fetchone()
+	return (row[0], row[1]) if row else None
+
+
 def upsert_sky_reading(conn: sqlite3.Connection, night_date: str, site_id: str,
 					   sqm_median: float, sqm_min: float, sqm_max: float,
 					   stars_median: float | None, stars_max: int | None,

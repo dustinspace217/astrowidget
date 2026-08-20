@@ -17,7 +17,11 @@ its full history window in a single call (`limit_s` seconds back from now —
 probed live 2026-08-18: limit_s=43200 returned 945 samples spanning 12 h), so
 a single request after dawn covers the entire night. No long-lived process, no
 overnight network dependency — if the camera or tailnet was down at 8 AM, the
-run fails LOUDLY (OnFailure= desktop notification) and re-fires next morning.
+run fails LOUDLY (OnFailure= desktop notification). NOTE the notification IS
+the recovery path for that night: the next morning's timer run targets the
+NEXT night, so a missed night stays missing unless this script is re-run
+manually while the charts history window still reaches it. An after-noon boot
+catch-up automatically steps back one day to the finished night (see main()).
 
 UNITS: indi-allsky's "sqm" series is the camera's RELATIVE luminance metric
 (exposure/gain-normalized ADU), not calibrated mag/arcsec². Lower = darker.
@@ -28,7 +32,7 @@ as the fetcher; see the [allsky] block in config.example.toml).
 """
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from statistics import median
 from zoneinfo import ZoneInfo
 
@@ -40,11 +44,15 @@ import requests
 import calibration_log as cl
 from astrowidget_fetch import load_config
 
-# Hard ceiling on the charts window we will ever request. 24 h always covers a
-# night; anything larger only adds daytime samples we clip away. Also bounds
-# the response size (Power-of-Ten rule 2/3: the loop over samples is bounded
-# because the request window is).
-MAX_WINDOW_HOURS = 24
+# Hard ceiling on the charts window we will ever request. 23 h covers any
+# night with hours to spare; anything larger only adds daytime samples we clip
+# away. Also bounds the response size (Power-of-Ten rule 2/3: the loop over
+# samples is bounded because the request window is). NOT 24: the samples carry
+# time-of-day only, so a full-day window makes the oldest samples' wall times
+# collide with "now" and the today/yesterday assignment turns ambiguous
+# (multimodel review 2026-08-20, Gemini + Kimi). 23 h keeps every sample's
+# date reconstruction unambiguous by construction.
+MAX_WINDOW_HOURS = 23
 
 # The camera samples every ~45 s, so a 24 h window is ~2,000 points per series.
 # A response wildly beyond that (100k+ points) means a server bug or a wrong
@@ -122,10 +130,12 @@ def resolve_sample_times(samples: list[dict], now_local: datetime) -> list[tuple
 
 
 def clip_to_window(points: list[tuple[datetime, float]],
-				   start: datetime, end: datetime) -> list[float]:
-	"""The y-values of the points that fall inside [start, end] (inclusive).
-	All three arguments are aware UTC datetimes/points from the callers above."""
-	return [y for (t, y) in points if start <= t <= end]
+				   start: datetime, end: datetime) -> list[tuple[datetime, float]]:
+	"""The (time, y) points that fall inside [start, end] (inclusive). Returns
+	PAIRS, not bare values — the caller needs the observed times to detect
+	coverage gaps (a camera that was down for part of the window). All
+	arguments are aware UTC datetimes/points from the callers above."""
+	return [(t, y) for (t, y) in points if start <= t <= end]
 
 
 def load_allsky_config() -> dict:
@@ -169,19 +179,33 @@ def load_allsky_config() -> dict:
 			f"[allsky] site_id '{site_id}' matches no [[sites]] id in config.toml "
 			f"(have: {site_ids})."))
 	site_id = matched
-	tz_name = allsky.get("timezone", "UTC")
+	# timezone is REQUIRED, no default (multimodel review, Sol): the charts
+	# samples are time-of-day only, so they CANNOT be interpreted without the
+	# camera's zone — a silent UTC assumption on a non-UTC camera reads the
+	# wrong hours and can produce a plausible summary of the wrong data.
+	tz_name = allsky.get("timezone")
+	if not isinstance(tz_name, str) or not tz_name:
+		raise SystemExit(_fail(
+			"[allsky] timezone is required — the IANA zone of the CAMERA's "
+			"clock (e.g. 'America/Denver'); chart timestamps are time-of-day "
+			"only and cannot be interpreted without it."))
 	try:
 		tz = ZoneInfo(tz_name)
 	except Exception:
 		raise SystemExit(_fail(
 			f"[allsky] timezone '{tz_name}' is not an IANA zone name "
 			"(e.g. 'America/Denver')."))
+	# NOTE the bool exclusions below: TOML `window_hours = true` parses to
+	# Python True, and isinstance(True, int) is True — a bare int check would
+	# silently accept it as 1 (multimodel review, Kimi).
 	window = allsky.get("window_hours", 14)
-	if not isinstance(window, int) or not (1 <= window <= MAX_WINDOW_HOURS):
+	if (not isinstance(window, int) or isinstance(window, bool)
+			or not (1 <= window <= MAX_WINDOW_HOURS)):
 		raise SystemExit(_fail(
 			f"[allsky] window_hours must be an integer 1-{MAX_WINDOW_HOURS}."))
 	camera_id = allsky.get("camera_id", 1)
-	if not isinstance(camera_id, int) or camera_id < 0:
+	if (not isinstance(camera_id, int) or isinstance(camera_id, bool)
+			or camera_id < 0):
 		raise SystemExit(_fail("[allsky] camera_id must be a non-negative integer."))
 	return {
 		"url": url.rstrip("/"),
@@ -246,6 +270,19 @@ def main() -> int:
 	conn = cl.connect()
 	try:
 		dark = cl.latest_dark_window(conn, night_date, site_id)
+		# After-noon boot catch-up (multimodel review 2026-08-20, found
+		# independently by all three peer models): past local noon the
+		# noon-to-noon formula names TODAY's night, whose dark window hasn't
+		# happened yet — the finished, recoverable night is the PREVIOUS one.
+		# Step back exactly one day, and ONLY on the demonstrated trigger (the
+		# resolved window lying in the future) — never on a missing row, which
+		# stays a loud fetch-outage failure for the normal morning case.
+		if dark is not None:
+			ds_probe = _iso_to_utc(dark[0])
+			if ds_probe is not None and ds_probe > now_utc:
+				night_date = (date.fromisoformat(night_date)
+							  - timedelta(days=1)).isoformat()
+				dark = cl.latest_dark_window(conn, night_date, site_id)
 		if dark is None:
 			return _fail(
 				f"no dark window logged for {night_date} at {site_id} — did the "
@@ -263,6 +300,16 @@ def main() -> int:
 		reach_back = now_utc - timedelta(hours=acfg["window_hours"])
 		clip_start = max(dark_start, reach_back)
 		clip_end = min(dark_end, now_utc)
+		# Wholly-unreachable night (stabilization QA SCR-1): a run late enough
+		# (or a pre-dark evening run early enough) that the charts history
+		# window and the dark window don't overlap at all. Fail with the real
+		# diagnosis BEFORE the truncation warning or a pointless fetch — the
+		# generic "was the camera down?" message would misdiagnose this.
+		if clip_start >= clip_end:
+			return _fail(
+				f"the {acfg['window_hours']} h charts history window no longer "
+				f"overlaps {night_date}'s dark window ({dark[0]} → {dark[1]}) — "
+				"that night is unrecoverable from this run; nothing written.")
 		if clip_start > dark_start:
 			missed = (clip_start - dark_start).total_seconds() / 60
 			sys.stderr.write(
@@ -281,10 +328,21 @@ def main() -> int:
 		chart_data = payload.get("chart_data")
 		if not isinstance(chart_data, dict):
 			return _fail("charts response has no chart_data object — wrong URL?")
-		sqm_raw = chart_data.get("sqm")
-		if not isinstance(sqm_raw, list) or not sqm_raw:
-			return _fail("charts response has no sqm series — is the camera's "
-						 "SQM sensor/feature enabled?")
+		# The sky-brightness series key DRIFTS across indi-allsky versions:
+		# the CSV camera served "sqm" on 2026-08-18 and "jsqm" (same metric,
+		# same scale — verified live against overlapping night values) after a
+		# server update on 2026-08-20. Accept either, oldest name first.
+		sqm_raw = None
+		for series_key in ("sqm", "jsqm"):
+			cand = chart_data.get(series_key)
+			if isinstance(cand, list) and cand:
+				sqm_raw = cand
+				break
+		if sqm_raw is None:
+			return _fail(
+				f"charts response has no sqm/jsqm series (keys present: "
+				f"{sorted(chart_data.keys())}) — is the camera's SQM feature "
+				"enabled, or did a server update rename the series again?")
 		if len(sqm_raw) > MAX_SAMPLES:
 			return _fail(f"sqm series absurdly large ({len(sqm_raw)} points) — "
 						 "refusing to summarize it.")
@@ -303,15 +361,52 @@ def main() -> int:
 			stars_raw = []
 
 		sqm_pts = resolve_sample_times(sqm_raw, now_local)
-		sqm_vals = clip_to_window(sqm_pts, clip_start, clip_end)
-		if not sqm_vals:
+		sqm_in = clip_to_window(sqm_pts, clip_start, clip_end)
+		if not sqm_in:
 			return _fail(
 				f"no sqm samples inside the dark window {dark[0]} → {dark[1]} "
 				f"(series spans {len(sqm_pts)} points) — was the camera down "
 				"overnight, or is [allsky] timezone wrong?")
-		stars_vals = clip_to_window(
+		sqm_vals = [y for (_, y) in sqm_in]
+		# Coverage-gap check (multimodel review, Sol): a camera that was down
+		# from dusk until mid-night still yields a "successful" row — the
+		# stats are honest for the samples that exist, but a large hole at
+		# either edge of the window deserves a journal warning so a quiet
+		# outage doesn't masquerade as a quiet night. Interior gaps are left
+		# to sample_count (stored) — edge gaps are the camera-outage tell.
+		first_t, last_t = sqm_in[0][0], sqm_in[-1][0]
+		for gap_min, edge in (((first_t - clip_start).total_seconds() / 60, "start"),
+							  ((clip_end - last_t).total_seconds() / 60, "end")):
+			if gap_min > 30:
+				sys.stderr.write(
+					f"astrowidget allsky capture: WARNING — no samples for "
+					f"{gap_min:.0f} min at the {edge} of the dark window; "
+					f"camera outage? Row records what was observed.\n")
+		stars_vals = [y for (_, y) in clip_to_window(
 			resolve_sample_times(stars_raw, now_local),
-			clip_start, clip_end)
+			clip_start, clip_end)]
+
+		# Coverage-regression guard (multimodel review, Sol; comparison refined
+		# in stabilization QA SCR-2/STA-2): "newest wins" is only right when
+		# the newest capture doesn't cover strictly LESS night than the row it
+		# replaces — a manual re-run hours after the morning capture reaches
+		# back a shorter distance, and replacing the full-night row with that
+		# would destroy better data. Block ONLY when the stored bounds
+		# STRICTLY contain this run's clip window: equal bounds are not
+		# strictly contained, so a same-morning corrected re-run replaces
+		# (newest wins on ties, by construction), and any window that extends
+		# past the stored one in either direction writes. Unparseable stored
+		# bounds fall through to overwrite — the fresh row has good bounds.
+		existing = cl.get_sky_reading_bounds(conn, night_date, site_id)
+		if existing is not None:
+			old_s, old_e = _iso_to_utc(existing[0]), _iso_to_utc(existing[1])
+			if (old_s is not None and old_e is not None
+					and old_s <= clip_start and clip_end <= old_e
+					and (old_s != clip_start or old_e != clip_end)):
+				print(f"sky_readings: {night_date} {site_id} — existing row "
+					  f"covers a wider window ({existing[0]} → {existing[1]}) "
+					  f"than this run; keeping it, nothing written.")
+				return 0
 
 		cl.upsert_sky_reading(
 			conn, night_date, site_id,

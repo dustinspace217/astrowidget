@@ -53,11 +53,13 @@ firms_radius_km = 150
 # url = "https://camera.example.com/indi-allsky"  # base URL of the indi-allsky web UI
 # site_id = "site_a"          # which [[sites]] id these readings belong to
 # camera_id = 2               # indi-allsky camera id (default 1)
-# timezone = "America/Denver"  # IANA zone of the CAMERA's clock — chart
-#                             # timestamps are time-of-day only, so this is how
-#                             # they're pinned to real instants (default UTC)
+# timezone = "America/Denver"  # REQUIRED: IANA zone of the CAMERA's clock —
+#                             # chart timestamps are time-of-day only and
+#                             # cannot be interpreted without it (no default)
 # window_hours = 14           # history window per capture; must reach from the
-#                             # morning timer back past dusk (default 14, max 24)
+#                             # morning timer back past dusk (default 14, max 23
+#                             # — a 24 h window would make the oldest samples'
+#                             # date reconstruction ambiguous)
 # insecure_tls = true         # accept a self-signed certificate (e.g. a camera
 #                             # on your own tailnet). Default false.
 
